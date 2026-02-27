@@ -1,0 +1,25 @@
+{
+    "name": "orchestra-mcp/plugin-tools-features",
+    "description": "Feature-driven project management tools (workflow, dependencies, WIP limits, reviews).",
+    "type": "plugin",
+    "license": "MIT",
+    "homepage": "https://orchestra-mcp.dev",
+    "support": {
+        "issues": "https://github.com/orchestra-mcp/plugin-tools-features/issues",
+        "source": "https://github.com/orchestra-mcp/plugin-tools-features"
+    },
+    "require": {
+        "orchestra-mcp/gen-go": "^0.1.0",
+        "orchestra-mcp/sdk-go": "^0.1.0"
+    },
+    "bin": "tools-features",
+    "extra": {
+        "plugin-id": "tools.features",
+        "provides": [
+            "tools"
+        ],
+        "branch-alias": {
+            "dev-master": "0.1.x-dev"
+        }
+    }
+}
