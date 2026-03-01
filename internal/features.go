@@ -1,5 +1,5 @@
 // Package internal contains the core registration logic for the tools.features
-// plugin. The FeaturesPlugin struct wires all 34 tool handlers to the plugin
+// plugin. The FeaturesPlugin struct wires all 49 tool handlers to the plugin
 // builder with their schemas and descriptions.
 package internal
 
@@ -14,7 +14,7 @@ type FeaturesPlugin struct {
 	Storage *storage.FeatureStorage
 }
 
-// RegisterTools registers all 34 tools on the given plugin builder.
+// RegisterTools registers all 49 tools on the given plugin builder.
 func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	s := fp.Storage
 
@@ -68,6 +68,9 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	builder.RegisterTool("get_workflow_status",
 		"Get feature counts per workflow status",
 		tools.GetWorkflowStatusSchema(), tools.GetWorkflowStatus(s))
+	builder.RegisterTool("get_gate_requirements",
+		"Get the gate requirements for the next transition of a feature. Shows what evidence is needed before advance_feature will succeed.",
+		tools.GetGateRequirementsSchema(), tools.GetGateRequirements(s))
 
 	// --- Review tools (3) ---
 	builder.RegisterTool("request_review",
@@ -135,4 +138,52 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	builder.RegisterTool("list_notes",
 		"List all notes in a feature's body",
 		tools.ListNotesSchema(), tools.ListNotes(s))
+
+	// --- Plan tools (7) ---
+	builder.RegisterTool("create_plan",
+		"Create a new plan for breaking down a large task into features",
+		tools.CreatePlanSchema(), tools.CreatePlan(s))
+	builder.RegisterTool("get_plan",
+		"Get a plan's data, body, and linked features",
+		tools.GetPlanSchema(), tools.GetPlan(s))
+	builder.RegisterTool("list_plans",
+		"List all plans in a project, optionally filtered by status",
+		tools.ListPlansSchema(), tools.ListPlans(s))
+	builder.RegisterTool("update_plan",
+		"Update a plan's title or description",
+		tools.UpdatePlanSchema(), tools.UpdatePlan(s))
+	builder.RegisterTool("approve_plan",
+		"Approve a draft plan for implementation",
+		tools.ApprovePlanSchema(), tools.ApprovePlan(s))
+	builder.RegisterTool("breakdown_plan",
+		"Break down an approved plan into features with dependencies",
+		tools.BreakdownPlanSchema(), tools.BreakdownPlan(s))
+	builder.RegisterTool("complete_plan",
+		"Mark a plan as completed after all features are done",
+		tools.CompletePlanSchema(), tools.CompletePlan(s))
+
+	// --- Request tools (6) ---
+	builder.RegisterTool("create_request",
+		"Save a user request to the queue (for processing after current work)",
+		tools.CreateRequestSchema(), tools.CreateRequest(s))
+	builder.RegisterTool("list_requests",
+		"List queued user requests, optionally filtered by status or kind",
+		tools.ListRequestsSchema(), tools.ListRequests(s))
+	builder.RegisterTool("get_request",
+		"Get a request's data and body",
+		tools.GetRequestSchema(), tools.GetRequest(s))
+	builder.RegisterTool("convert_request",
+		"Convert a pending request into a feature",
+		tools.ConvertRequestSchema(), tools.ConvertRequest(s))
+	builder.RegisterTool("dismiss_request",
+		"Dismiss a request with a reason",
+		tools.DismissRequestSchema(), tools.DismissRequest(s))
+	builder.RegisterTool("get_next_request",
+		"Get the highest-priority pending request",
+		tools.GetNextRequestSchema(), tools.GetNextRequest(s))
+
+	// --- Bug tools (1) ---
+	builder.RegisterTool("create_bug_report",
+		"Report a bug, optionally linked to the feature that caused it",
+		tools.CreateBugReportSchema(), tools.CreateBugReport(s))
 }

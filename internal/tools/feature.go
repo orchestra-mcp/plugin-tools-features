@@ -22,6 +22,7 @@ func CreateFeatureSchema() *structpb.Struct {
 			"title":       map[string]any{"type": "string", "description": "Feature title"},
 			"description": map[string]any{"type": "string", "description": "Feature description"},
 			"priority":    map[string]any{"type": "string", "description": "Priority (P0-P3)", "enum": []any{"P0", "P1", "P2", "P3"}},
+			"kind":        map[string]any{"type": "string", "description": "Feature kind (feature, bug, hotfix, chore)", "enum": []any{"feature", "bug", "hotfix", "chore"}},
 		},
 		"required": []any{"project_id", "title"},
 	})
@@ -61,6 +62,7 @@ func ListFeaturesSchema() *structpb.Struct {
 		"properties": map[string]any{
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"status":     map[string]any{"type": "string", "description": "Filter by status (optional)"},
+			"kind":       map[string]any{"type": "string", "description": "Filter by kind (optional)"},
 		},
 		"required": []any{"project_id"},
 	})
@@ -85,6 +87,7 @@ func SearchFeaturesSchema() *structpb.Struct {
 		"properties": map[string]any{
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"query":      map[string]any{"type": "string", "description": "Search query"},
+			"kind":       map[string]any{"type": "string", "description": "Filter by kind (optional)"},
 		},
 		"required": []any{"project_id", "query"},
 	})
@@ -110,6 +113,11 @@ func CreateFeature(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("validation_error", err.Error()), nil
 		}
 
+		kind := helpers.GetStringOr(req.Arguments, "kind", "feature")
+		if err := helpers.ValidateOneOf(kind, types.ValidKinds...); err != nil {
+			return helpers.ErrorResult("validation_error", err.Error()), nil
+		}
+
 		// Verify the project exists.
 		_, _, err := store.ReadProject(ctx, projectID)
 		if err != nil {
@@ -126,6 +134,7 @@ func CreateFeature(store *storage.FeatureStorage) ToolHandler {
 			Description: description,
 			Status:      types.StatusBacklog,
 			Priority:    priority,
+			Kind:        types.FeatureKind(kind),
 			Version:     0,
 			CreatedAt:   now,
 			UpdatedAt:   now,
@@ -228,13 +237,32 @@ func ListFeatures(store *storage.FeatureStorage) ToolHandler {
 			features = filtered
 		}
 
+		kindFilter := helpers.GetString(req.Arguments, "kind")
+		if kindFilter != "" {
+			var filtered []*types.FeatureData
+			for _, f := range features {
+				k := string(f.Kind)
+				if k == "" {
+					k = "feature"
+				}
+				if k == kindFilter {
+					filtered = append(filtered, f)
+				}
+			}
+			features = filtered
+		}
+
 		if features == nil {
 			features = []*types.FeatureData{}
 		}
 
 		header := "Features"
-		if statusFilter != "" {
+		if statusFilter != "" && kindFilter != "" {
+			header = fmt.Sprintf("Features (%s, kind=%s)", statusFilter, kindFilter)
+		} else if statusFilter != "" {
 			header = fmt.Sprintf("Features (%s)", statusFilter)
+		} else if kindFilter != "" {
+			header = fmt.Sprintf("Features (kind=%s)", kindFilter)
 		}
 		return helpers.TextResult(helpers.FormatFeatureListMD(features, header)), nil
 	}
@@ -283,11 +311,29 @@ func SearchFeatures(store *storage.FeatureStorage) ToolHandler {
 			}
 		}
 
+		kindFilter := helpers.GetString(req.Arguments, "kind")
+		if kindFilter != "" {
+			var filtered []*types.FeatureData
+			for _, f := range matches {
+				k := string(f.Kind)
+				if k == "" {
+					k = "feature"
+				}
+				if k == kindFilter {
+					filtered = append(filtered, f)
+				}
+			}
+			matches = filtered
+		}
+
 		if matches == nil {
 			matches = []*types.FeatureData{}
 		}
 
 		header := fmt.Sprintf("Search results for %q", query)
+		if kindFilter != "" {
+			header = fmt.Sprintf("Search results for %q (kind=%s)", query, kindFilter)
+		}
 		return helpers.TextResult(helpers.FormatFeatureListMD(matches, header)), nil
 	}
 }

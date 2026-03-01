@@ -324,6 +324,9 @@ func featureToMetadata(f *types.FeatureData) (*structpb.Struct, error) {
 	if f.Estimate != "" {
 		m["estimate"] = f.Estimate
 	}
+	if f.Kind != "" {
+		m["kind"] = string(f.Kind)
+	}
 	return structpb.NewStruct(m)
 }
 
@@ -367,4 +370,178 @@ func metadataToProject(meta *structpb.Struct) (*types.ProjectData, error) {
 		return nil, err
 	}
 	return &p, nil
+}
+
+// ---------- Plan operations ----------
+
+// ReadPlan loads a plan by project slug and plan ID.
+func (fs *FeatureStorage) ReadPlan(ctx context.Context, projectSlug, planID string) (*types.PlanData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.PlansDir, planID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read plan %s/%s: %w", projectSlug, planID, err)
+	}
+	plan, err := metadataToPlan(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse plan %s/%s: %w", projectSlug, planID, err)
+	}
+	return plan, string(resp.Content), resp.Version, nil
+}
+
+// WritePlan persists a plan to storage.
+func (fs *FeatureStorage) WritePlan(ctx context.Context, projectSlug, planID string, data *types.PlanData, body string, expectedVersion int64) (int64, error) {
+	meta, err := planToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode plan: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.PlansDir, planID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListPlans returns all plans for a project.
+func (fs *FeatureStorage) ListPlans(ctx context.Context, projectSlug string) ([]*types.PlanData, error) {
+	prefix := filepath.Join(projectSlug, helpers.PlansDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list plans: %w", err)
+	}
+	var plans []*types.PlanData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		planID := strings.TrimSuffix(base, ".md")
+		plan, _, _, err := fs.ReadPlan(ctx, projectSlug, planID)
+		if err != nil {
+			continue
+		}
+		plans = append(plans, plan)
+	}
+	return plans, nil
+}
+
+// DeletePlan removes a plan from storage.
+func (fs *FeatureStorage) DeletePlan(ctx context.Context, projectSlug, planID string) error {
+	path := filepath.Join(projectSlug, helpers.PlansDir, planID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
+func planToMetadata(p *types.PlanData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":          p.ID,
+		"project_id":  p.ProjectID,
+		"title":       p.Title,
+		"description": p.Description,
+		"status":      string(p.Status),
+		"version":     float64(p.Version),
+		"created_at":  p.CreatedAt,
+		"updated_at":  p.UpdatedAt,
+	}
+	if len(p.Features) > 0 {
+		feats := make([]any, len(p.Features))
+		for i, f := range p.Features {
+			feats[i] = f
+		}
+		m["features"] = feats
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToPlan(meta *structpb.Struct) (*types.PlanData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var p types.PlanData
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// ---------- Request operations ----------
+
+// ReadRequest loads a request by project slug and request ID.
+func (fs *FeatureStorage) ReadRequest(ctx context.Context, projectSlug, requestID string) (*types.RequestData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.RequestsDir, requestID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read request %s/%s: %w", projectSlug, requestID, err)
+	}
+	req, err := metadataToRequest(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse request %s/%s: %w", projectSlug, requestID, err)
+	}
+	return req, string(resp.Content), resp.Version, nil
+}
+
+// WriteRequest persists a request to storage.
+func (fs *FeatureStorage) WriteRequest(ctx context.Context, projectSlug, requestID string, data *types.RequestData, body string, expectedVersion int64) (int64, error) {
+	meta, err := requestToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode request: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.RequestsDir, requestID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListRequests returns all requests for a project.
+func (fs *FeatureStorage) ListRequests(ctx context.Context, projectSlug string) ([]*types.RequestData, error) {
+	prefix := filepath.Join(projectSlug, helpers.RequestsDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list requests: %w", err)
+	}
+	var requests []*types.RequestData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		requestID := strings.TrimSuffix(base, ".md")
+		r, _, _, err := fs.ReadRequest(ctx, projectSlug, requestID)
+		if err != nil {
+			continue
+		}
+		requests = append(requests, r)
+	}
+	return requests, nil
+}
+
+// DeleteRequest removes a request from storage.
+func (fs *FeatureStorage) DeleteRequest(ctx context.Context, projectSlug, requestID string) error {
+	path := filepath.Join(projectSlug, helpers.RequestsDir, requestID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
+func requestToMetadata(r *types.RequestData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":          r.ID,
+		"project_id":  r.ProjectID,
+		"title":       r.Title,
+		"description": r.Description,
+		"kind":        r.Kind,
+		"status":      string(r.Status),
+		"priority":    r.Priority,
+		"version":     float64(r.Version),
+		"created_at":  r.CreatedAt,
+		"updated_at":  r.UpdatedAt,
+	}
+	if r.ConvertedTo != "" {
+		m["converted_to"] = r.ConvertedTo
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToRequest(meta *structpb.Struct) (*types.RequestData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var r types.RequestData
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
