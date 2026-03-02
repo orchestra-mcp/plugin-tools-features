@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -114,18 +115,36 @@ func nextStepHint(featureID string, newStatus types.FeatureStatus) string {
 
 // MinGateInterval is the minimum time that must pass between gated transitions.
 // This prevents agents from rapid-fire advancing through gates without doing
-// actual work (testing, documentation, review). Set to 30 seconds — enough to
-// catch instant batch-advancement but short enough for legitimate fast work.
+// actual work (testing, documentation, review). Set to 30 seconds.
 // Exported as a variable so tests can override it.
 var MinGateInterval = 30 * time.Second
+
+// EscalatingCooldownWindow is the time window to look back for recent gate
+// passages. If multiple gates were passed within this window, the cooldown
+// escalates (doubles per extra gate). Set to 5 minutes.
+var EscalatingCooldownWindow = 5 * time.Minute
+
+// MaxEvidenceSimilarity is the maximum allowed Jaccard similarity (0.0-1.0)
+// between new evidence and any previous gate evidence in the feature body.
+// Evidence more similar than this threshold is rejected as likely copy-paste.
+var MaxEvidenceSimilarity = 0.6
+
+// gateTimestampPattern matches gate transition timestamps in the feature body.
+// Format: **status -> status** (2026-03-01T12:34:56Z):
+var gateTimestampPattern = regexp.MustCompile(`\*\*\w[\w-]* -> \w[\w-]*\*\* \((\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\)]*)\):`)
+
+// gateEvidencePattern splits the body into gate evidence blocks.
+// Each block starts with --- followed by **from -> to** (timestamp): and ends at the next ---.
+var gateEvidencePattern = regexp.MustCompile(`(?s)---\n\*\*\w[\w-]* -> \w[\w-]*\*\* \([^)]+\):\n(.+?)(?:\n---|\z)`)
 
 // AdvanceFeature advances a feature to the next valid status in the workflow.
 // Gated transitions require structured evidence with specific ## sections.
 // Call get_gate_requirements to see what is needed for the next transition.
 //
-// GUARDRAIL: Gated transitions enforce a minimum time interval since the last
-// status change. This prevents agents from skipping actual work by advancing
-// through all gates in seconds.
+// GUARDRAILS:
+// 1. Escalating cooldown: base 30s, doubles for each gate passed in last 5 min
+// 2. Evidence validation: sections, file paths, minimum lengths
+// 3. Evidence uniqueness: rejects copy-pasted evidence across gates
 func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id"); err != nil {
@@ -164,26 +183,53 @@ func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
 				// Auto-pass: append a note that the gate was skipped for this kind.
 				body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s): Gate skipped for kind=%s\n", oldStatus, newStatus, helpers.NowISO(), feat.Kind)
 			} else {
-				// GUARDRAIL: Enforce minimum time between gated transitions.
-				if elapsed, ok := timeSinceUpdate(feat.UpdatedAt); ok && elapsed < MinGateInterval {
-					remaining := MinGateInterval - elapsed
+				// GUARDRAIL 1: Enforce escalating cooldown between gated transitions.
+				// Base cooldown is MinGateInterval. If multiple gates were passed
+				// within EscalatingCooldownWindow, the cooldown doubles per extra gate.
+				requiredCooldown := calculateEscalatingCooldown(body, MinGateInterval)
+				if elapsed, ok := timeSinceUpdate(feat.UpdatedAt); ok && elapsed < requiredCooldown {
+					remaining := requiredCooldown - elapsed
+					escalationNote := ""
+					if requiredCooldown > MinGateInterval {
+						escalationNote = fmt.Sprintf("\n\n**Escalated cooldown:** Multiple gates passed recently. "+
+							"Cooldown increased from %s to **%s**. "+
+							"Do real work between gates instead of using sleep/wait.",
+							MinGateInterval, requiredCooldown.Round(time.Second))
+					}
 					return helpers.ErrorResult("gate_cooldown",
 						fmt.Sprintf("## Gate Cooldown\n\n"+
-							"Cannot advance **%s** yet — only **%s** since the last status change.\n\n"+
+							"Cannot advance **%s** yet -- only **%s** since the last status change.\n\n"+
 							"Gated transitions require at least **%s** between advances to ensure "+
 							"actual work (testing, documentation, review) is performed.\n\n"+
-							"Wait **%s** before trying again, or do the required work first.",
+							"Do NOT use `sleep` or `wait` to bypass this cooldown. "+
+							"Do the required work (run tests, write docs, review code) instead.\n\n"+
+							"Remaining: **%s**%s",
 							featureID,
 							elapsed.Round(time.Second),
-							MinGateInterval,
-							remaining.Round(time.Second))), nil
+							requiredCooldown.Round(time.Second),
+							remaining.Round(time.Second),
+							escalationNote)), nil
 				}
 
+				// GUARDRAIL 2: Validate evidence structure and content.
 				if err := gate.Validate(evidence); err != nil {
 					msg := fmt.Sprintf("## Gate Blocked: %s\n\n**%s**\n\n%s",
 						gate.Name, err.Error(), gate.Checklist)
 					return helpers.ErrorResult("gate_blocked", msg), nil
 				}
+
+				// GUARDRAIL 3: Evidence uniqueness -- reject copy-pasted evidence.
+				if similarity := maxPriorEvidenceSimilarity(body, evidence); similarity > MaxEvidenceSimilarity {
+					return helpers.ErrorResult("evidence_duplicate",
+						fmt.Sprintf("## Evidence Too Similar\n\n"+
+							"The evidence provided is **%.0f%% similar** to evidence from a previous gate.\n\n"+
+							"Each gate requires **unique, specific evidence** reflecting the actual work done "+
+							"at that stage (implementation, testing, documentation). "+
+							"Copy-pasting or templating evidence across gates is not allowed.\n\n"+
+							"Write evidence that describes what you specifically did for THIS gate.",
+							similarity*100)), nil
+				}
+
 				// Append evidence to body.
 				body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s):\n%s\n", oldStatus, newStatus, helpers.NowISO(), evidence)
 			}
@@ -204,6 +250,152 @@ func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
 		msg += nextStepHint(featureID, newStatus)
 		return helpers.TextResult(msg), nil
 	}
+}
+
+// calculateEscalatingCooldown parses recent gate timestamps from the feature
+// body and returns an escalated cooldown duration. For each gate passed within
+// EscalatingCooldownWindow, the cooldown doubles. This prevents agents from
+// using sleep(30) between each gate to rapidly advance through the workflow.
+//
+// Examples (with 30s base, 5min window):
+//   - 0 recent gates: 30s (base)
+//   - 1 recent gate: 60s (doubled once)
+//   - 2 recent gates: 120s (doubled twice)
+//   - 3 recent gates: 240s (doubled three times)
+func calculateEscalatingCooldown(body string, baseCooldown time.Duration) time.Duration {
+	if baseCooldown == 0 || EscalatingCooldownWindow == 0 {
+		return baseCooldown // tests disable cooldown
+	}
+
+	now := time.Now()
+	cutoff := now.Add(-EscalatingCooldownWindow)
+
+	matches := gateTimestampPattern.FindAllStringSubmatch(body, -1)
+	recentCount := 0
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, m[1])
+		if err != nil {
+			t, err = time.Parse("2006-01-02T15:04:05", m[1])
+			if err != nil {
+				continue
+			}
+		}
+		if t.After(cutoff) {
+			recentCount++
+		}
+	}
+
+	// Double the cooldown for each recent gate passage.
+	cooldown := baseCooldown
+	for i := 0; i < recentCount; i++ {
+		cooldown *= 2
+	}
+
+	// Cap at 10 minutes to avoid absurd waits.
+	maxCooldown := 10 * time.Minute
+	if cooldown > maxCooldown {
+		cooldown = maxCooldown
+	}
+
+	return cooldown
+}
+
+// maxPriorEvidenceSimilarity extracts previous gate evidence blocks from the
+// feature body and computes the maximum Jaccard similarity between any prior
+// block and the new evidence. Returns 0.0 if no prior evidence exists.
+func maxPriorEvidenceSimilarity(body, newEvidence string) float64 {
+	if body == "" || newEvidence == "" {
+		return 0
+	}
+
+	matches := gateEvidencePattern.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		return 0
+	}
+
+	newWords := tokenize(newEvidence)
+	if len(newWords) == 0 {
+		return 0
+	}
+
+	maxSim := 0.0
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		priorWords := tokenize(m[1])
+		if len(priorWords) == 0 {
+			continue
+		}
+		sim := jaccardSimilarity(newWords, priorWords)
+		if sim > maxSim {
+			maxSim = sim
+		}
+	}
+
+	return maxSim
+}
+
+// tokenize splits text into lowercase word tokens, filtering out markdown
+// syntax, punctuation, and common stop words. Used for evidence comparison.
+func tokenize(text string) map[string]bool {
+	words := make(map[string]bool)
+	// Split on non-alphanumeric characters.
+	for _, word := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' || r == '/')
+	}) {
+		// Skip very short words and common stop words.
+		if len(word) <= 2 {
+			continue
+		}
+		if isStopWord(word) {
+			continue
+		}
+		words[word] = true
+	}
+	return words
+}
+
+// isStopWord returns true for common English stop words that should be excluded
+// from evidence similarity comparison.
+func isStopWord(w string) bool {
+	stops := map[string]bool{
+		"the": true, "and": true, "for": true, "with": true, "that": true,
+		"this": true, "from": true, "are": true, "was": true, "were": true,
+		"has": true, "have": true, "had": true, "been": true, "being": true,
+		"not": true, "all": true, "can": true, "but": true, "will": true,
+	}
+	return stops[w]
+}
+
+// jaccardSimilarity computes the Jaccard index between two word sets:
+// |intersection| / |union|. Returns 0.0 to 1.0.
+func jaccardSimilarity(a, b map[string]bool) float64 {
+	if len(a) == 0 && len(b) == 0 {
+		return 0
+	}
+
+	intersection := 0
+	for w := range a {
+		if b[w] {
+			intersection++
+		}
+	}
+
+	union := len(a)
+	for w := range b {
+		if !a[w] {
+			union++
+		}
+	}
+
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
 }
 
 // timeSinceUpdate parses the feature's UpdatedAt ISO timestamp and returns the
@@ -380,14 +572,14 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 					assigneeMsg = fmt.Sprintf("assignee **%s**", feat.Assignee)
 				}
 				return helpers.ErrorResult("wip_violation",
-					fmt.Sprintf("Cannot start **%s** — feature **%s** (%s) is already **%s** for %s. "+
-						"Finish it through its full lifecycle (→ done) before starting another feature. "+
+					fmt.Sprintf("Cannot start **%s** -- feature **%s** (%s) is already **%s** for %s. "+
+						"Finish it through its full lifecycle (-> done) before starting another feature. "+
 						"One feature at a time per agent/assignee.",
 						featureID, f.ID, f.Title, f.Status, assigneeMsg)), nil
 			}
 		}
 
-		// Auto-advance from backlog → todo so the next transition to in-progress is valid.
+		// Auto-advance from backlog -> todo so the next transition to in-progress is valid.
 		if feat.Status == types.StatusBacklog {
 			feat.Status = types.StatusTodo
 			feat.UpdatedAt = helpers.NowISO()
@@ -438,7 +630,7 @@ type modelTier struct {
 	displayName string
 }
 
-// Model capability tiers — maps model patterns to max estimate they can handle.
+// Model capability tiers -- maps model patterns to max estimate they can handle.
 // Tier 1 (Haiku-class): S only
 // Tier 2 (Sonnet-class): S, M
 // Tier 3 (Opus-class): S, M, L, XL
@@ -568,7 +760,7 @@ Present the feature details and self-review evidence, then call submit_review wi
 
 		if gate == nil {
 			return helpers.TextResult(fmt.Sprintf(
-				"Feature **%s** is **%s**. The next transition to **%s** is **free** — you can call advance_feature without evidence.",
+				"Feature **%s** is **%s**. The next transition to **%s** is **free** -- you can call advance_feature without evidence.",
 				featureID, feat.Status, nextStatus)), nil
 		}
 

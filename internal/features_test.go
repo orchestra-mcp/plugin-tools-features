@@ -13,10 +13,12 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-// TestMain disables the gate cooldown for all tests so they can advance
-// features through gates instantly without waiting 30 seconds.
+// TestMain disables the gate cooldown and related guardrails for all tests so
+// they can advance features through gates instantly without waiting.
 func TestMain(m *testing.M) {
 	tools.MinGateInterval = 0
+	tools.EscalatingCooldownWindow = 0
+	tools.MaxEvidenceSimilarity = 1.0 // disable similarity check in tests
 	os.Exit(m.Run())
 }
 
@@ -939,10 +941,11 @@ func TestGateBlocksWithMissingSections(t *testing.T) {
 	})
 
 	// Provide evidence with only Summary (missing Changes and Verification).
+	// Must be >100 chars total to pass MinTotalLen check and reach the section check.
 	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
 		"project_id": "gate-missing-test",
 		"feature_id": featureID,
-		"evidence":   "## Summary\nImplemented the entire login flow with full OAuth2 support.",
+		"evidence":   "## Summary\nImplemented the entire login flow with full OAuth2 support including token refresh, PKCE verification, and error handling for all edge cases.",
 	})
 	if resp.Success {
 		t.Fatal("expected gate to block with missing sections")
