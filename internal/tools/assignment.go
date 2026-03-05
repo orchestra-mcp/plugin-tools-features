@@ -285,7 +285,7 @@ func GetPersonWorkload(store *storage.FeatureStorage) ToolHandler {
 
 		// Feature list.
 		fmt.Fprintf(&b, "\n")
-		fmt.Fprintf(&b, helpers.FormatFeatureListMD(assigned, "Assigned Features"))
+		fmt.Fprintf(&b, "%s", helpers.FormatFeatureListMD(assigned, "Assigned Features"))
 
 		return helpers.TextResult(b.String()), nil
 	}
