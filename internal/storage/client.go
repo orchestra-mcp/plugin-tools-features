@@ -512,6 +512,110 @@ func (fs *FeatureStorage) DeleteRequest(ctx context.Context, projectSlug, reques
 	return fs.storageDelete(ctx, path)
 }
 
+// ---------- Person operations ----------
+
+// ReadPerson loads a person by project slug and person ID.
+func (fs *FeatureStorage) ReadPerson(ctx context.Context, projectSlug, personID string) (*types.PersonData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.PersonsDir, personID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read person %s/%s: %w", projectSlug, personID, err)
+	}
+	person, err := metadataToPerson(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse person %s/%s: %w", projectSlug, personID, err)
+	}
+	return person, string(resp.Content), resp.Version, nil
+}
+
+// WritePerson persists a person to storage.
+func (fs *FeatureStorage) WritePerson(ctx context.Context, projectSlug, personID string, data *types.PersonData, body string, expectedVersion int64) (int64, error) {
+	meta, err := personToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode person: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.PersonsDir, personID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListPersons returns all persons for a project.
+func (fs *FeatureStorage) ListPersons(ctx context.Context, projectSlug string) ([]*types.PersonData, error) {
+	prefix := filepath.Join(projectSlug, helpers.PersonsDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list persons: %w", err)
+	}
+	var persons []*types.PersonData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		personID := strings.TrimSuffix(base, ".md")
+		person, _, _, err := fs.ReadPerson(ctx, projectSlug, personID)
+		if err != nil {
+			continue
+		}
+		persons = append(persons, person)
+	}
+	return persons, nil
+}
+
+// DeletePerson removes a person from storage.
+func (fs *FeatureStorage) DeletePerson(ctx context.Context, projectSlug, personID string) error {
+	path := filepath.Join(projectSlug, helpers.PersonsDir, personID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
+// ---------- Assignment Rule operations ----------
+
+// ReadAssignmentRule loads an assignment rule by project slug and rule ID.
+func (fs *FeatureStorage) ReadAssignmentRule(ctx context.Context, projectSlug, ruleID string) (*types.AssignmentRuleData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.AssignmentRulesDir, ruleID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read assignment rule %s/%s: %w", projectSlug, ruleID, err)
+	}
+	rule, err := metadataToAssignmentRule(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse assignment rule %s/%s: %w", projectSlug, ruleID, err)
+	}
+	return rule, string(resp.Content), resp.Version, nil
+}
+
+// WriteAssignmentRule persists an assignment rule to storage.
+func (fs *FeatureStorage) WriteAssignmentRule(ctx context.Context, projectSlug, ruleID string, data *types.AssignmentRuleData, body string, expectedVersion int64) (int64, error) {
+	meta, err := assignmentRuleToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode assignment rule: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.AssignmentRulesDir, ruleID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListAssignmentRules returns all assignment rules for a project.
+func (fs *FeatureStorage) ListAssignmentRules(ctx context.Context, projectSlug string) ([]*types.AssignmentRuleData, error) {
+	prefix := filepath.Join(projectSlug, helpers.AssignmentRulesDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list assignment rules: %w", err)
+	}
+	var rules []*types.AssignmentRuleData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		ruleID := strings.TrimSuffix(base, ".md")
+		rule, _, _, err := fs.ReadAssignmentRule(ctx, projectSlug, ruleID)
+		if err != nil {
+			continue
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
+}
+
+// DeleteAssignmentRule removes an assignment rule from storage.
+func (fs *FeatureStorage) DeleteAssignmentRule(ctx context.Context, projectSlug, ruleID string) error {
+	path := filepath.Join(projectSlug, helpers.AssignmentRulesDir, ruleID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
 func requestToMetadata(r *types.RequestData) (*structpb.Struct, error) {
 	m := map[string]any{
 		"id":          r.ID,
@@ -540,6 +644,90 @@ func metadataToRequest(meta *structpb.Struct) (*types.RequestData, error) {
 		return nil, err
 	}
 	var r types.RequestData
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ---------- Person metadata conversion ----------
+
+func personToMetadata(p *types.PersonData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":         p.ID,
+		"project_id": p.ProjectID,
+		"name":       p.Name,
+		"role":       string(p.Role),
+		"status":     string(p.Status),
+		"version":    float64(p.Version),
+		"created_at": p.CreatedAt,
+		"updated_at": p.UpdatedAt,
+	}
+	if p.Email != "" {
+		m["email"] = p.Email
+	}
+	if p.Bio != "" {
+		m["bio"] = p.Bio
+	}
+	if p.GithubEmail != "" {
+		m["github_email"] = p.GithubEmail
+	}
+	if len(p.Integrations) > 0 {
+		integ := make(map[string]any, len(p.Integrations))
+		for k, v := range p.Integrations {
+			integ[k] = v
+		}
+		m["integrations"] = integ
+	}
+	if len(p.Labels) > 0 {
+		labels := make([]any, len(p.Labels))
+		for i, l := range p.Labels {
+			labels[i] = l
+		}
+		m["labels"] = labels
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToPerson(meta *structpb.Struct) (*types.PersonData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var p types.PersonData
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// ---------- Assignment Rule metadata conversion ----------
+
+func assignmentRuleToMetadata(r *types.AssignmentRuleData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":         r.ID,
+		"project_id": r.ProjectID,
+		"kind":       r.Kind,
+		"person_id":  r.PersonID,
+		"version":    float64(r.Version),
+		"created_at": r.CreatedAt,
+		"updated_at": r.UpdatedAt,
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToAssignmentRule(meta *structpb.Struct) (*types.AssignmentRuleData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var r types.AssignmentRuleData
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, err
 	}

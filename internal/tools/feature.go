@@ -22,7 +22,7 @@ func CreateFeatureSchema() *structpb.Struct {
 			"title":       map[string]any{"type": "string", "description": "Feature title"},
 			"description": map[string]any{"type": "string", "description": "Feature description"},
 			"priority":    map[string]any{"type": "string", "description": "Priority (P0-P3)", "enum": []any{"P0", "P1", "P2", "P3"}},
-			"kind":        map[string]any{"type": "string", "description": "Feature kind (feature, bug, hotfix, chore)", "enum": []any{"feature", "bug", "hotfix", "chore"}},
+			"kind":        map[string]any{"type": "string", "description": "Feature kind", "enum": []any{"feature", "bug", "hotfix", "chore", "testcase"}},
 		},
 		"required": []any{"project_id", "title"},
 	})
@@ -146,6 +146,8 @@ func CreateFeature(store *storage.FeatureStorage) ToolHandler {
 		if err != nil {
 			return helpers.ErrorResult("storage_error", err.Error()), nil
 		}
+
+		applyAutoAssignment(ctx, store, projectID, featureID, kind)
 
 		md := fmt.Sprintf("Created **%s**: %s\n\n%s", featureID, title, helpers.FormatFeatureMD(feat))
 		return helpers.TextResult(md), nil

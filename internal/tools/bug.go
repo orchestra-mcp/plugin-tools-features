@@ -88,6 +88,8 @@ func CreateBugReport(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("storage_error", err.Error()), nil
 		}
 
+		applyAutoAssignment(ctx, store, projectID, featureID, string(types.KindBug))
+
 		md := fmt.Sprintf("Created bug **%s**: %s\n\n%s", featureID, title, helpers.FormatFeatureMD(feat))
 		return helpers.TextResult(md), nil
 	}

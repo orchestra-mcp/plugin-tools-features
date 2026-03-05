@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
-	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
+	"github.com/orchestra-mcp/sdk-go/helpers"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -203,6 +203,15 @@ func AssignFeature(store *storage.FeatureStorage) ToolHandler {
 		projectID := helpers.GetString(req.Arguments, "project_id")
 		featureID := helpers.GetString(req.Arguments, "feature_id")
 		assignee := helpers.GetString(req.Arguments, "assignee")
+
+		// If assignee is a person ID, validate it exists in the registry.
+		if strings.HasPrefix(assignee, "PERS-") {
+			_, _, _, err := store.ReadPerson(ctx, projectID, assignee)
+			if err != nil {
+				return helpers.ErrorResult("not_found",
+					fmt.Sprintf("person %q not found in project %q", assignee, projectID)), nil
+			}
+		}
 
 		feat, body, version, err := store.ReadFeature(ctx, projectID, featureID)
 		if err != nil {

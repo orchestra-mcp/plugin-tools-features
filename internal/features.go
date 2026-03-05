@@ -1,5 +1,5 @@
 // Package internal contains the core registration logic for the tools.features
-// plugin. The FeaturesPlugin struct wires all 49 tool handlers to the plugin
+// plugin. The FeaturesPlugin struct wires all 70 tool handlers to the plugin
 // builder with their schemas and descriptions.
 package internal
 
@@ -14,7 +14,7 @@ type FeaturesPlugin struct {
 	Storage *storage.FeatureStorage
 }
 
-// RegisterTools registers all 49 tools on the given plugin builder.
+// RegisterTools registers all 70 tools on the given plugin builder.
 func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	s := fp.Storage
 
@@ -186,4 +186,77 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	builder.RegisterTool("create_bug_report",
 		"Report a bug, optionally linked to the feature that caused it",
 		tools.CreateBugReportSchema(), tools.CreateBugReport(s))
+
+	// --- Test Case tools (2) ---
+	builder.RegisterTool("create_test_case",
+		"Create a test case linked to a feature (kind=testcase, docs gate auto-skipped)",
+		tools.CreateTestCaseSchema(), tools.CreateTestCase(s))
+	builder.RegisterTool("bulk_create_test_cases",
+		"Create multiple test cases for a feature in one call",
+		tools.BulkCreateTestCasesSchema(), tools.BulkCreateTestCases(s))
+
+	// --- Person tools (5) ---
+	builder.RegisterTool("create_person",
+		"Create a person in the project registry with a role (developer/qa/reviewer/lead)",
+		tools.CreatePersonSchema(), tools.CreatePerson(s))
+	builder.RegisterTool("get_person",
+		"Get a person's details from the project registry",
+		tools.GetPersonSchema(), tools.GetPerson(s))
+	builder.RegisterTool("list_persons",
+		"List all persons in a project, optionally filtered by role or status",
+		tools.ListPersonsSchema(), tools.ListPersons(s))
+	builder.RegisterTool("update_person",
+		"Update a person's name, email, role, or status",
+		tools.UpdatePersonSchema(), tools.UpdatePerson(s))
+	builder.RegisterTool("delete_person",
+		"Delete a person from the project registry",
+		tools.DeletePersonSchema(), tools.DeletePerson(s))
+
+	// --- Assignment tools (5) ---
+	builder.RegisterTool("bulk_assign_features",
+		"Assign multiple features to one person in bulk",
+		tools.BulkAssignFeaturesSchema(), tools.BulkAssignFeatures(s))
+	builder.RegisterTool("create_assignment_rule",
+		"Create an auto-assignment rule: when features of a kind are created, auto-assign to a person",
+		tools.CreateAssignmentRuleSchema(), tools.CreateAssignmentRule(s))
+	builder.RegisterTool("list_assignment_rules",
+		"List all auto-assignment rules for a project",
+		tools.ListAssignmentRulesSchema(), tools.ListAssignmentRules(s))
+	builder.RegisterTool("delete_assignment_rule",
+		"Delete an auto-assignment rule",
+		tools.DeleteAssignmentRuleSchema(), tools.DeleteAssignmentRule(s))
+	builder.RegisterTool("get_person_workload",
+		"Get all features assigned to a person with status breakdown",
+		tools.GetPersonWorkloadSchema(), tools.GetPersonWorkload(s))
+
+	// --- Current User tools (3) ---
+	builder.RegisterTool("set_current_user",
+		"Link the current machine user to a person in a project (stored in ~/.orchestra/me.json)",
+		tools.SetCurrentUserSchema(), tools.SetCurrentUser(s))
+	builder.RegisterTool("get_current_user",
+		"Get the current user's person data and workload summary",
+		tools.GetCurrentUserSchema(), tools.GetCurrentUser(s))
+	builder.RegisterTool("get_my_features",
+		"List features assigned to the current user",
+		tools.GetMyFeaturesSchema(), tools.GetMyFeatures(s))
+
+	// --- Git tools (6) ---
+	builder.RegisterTool("git_quick_commit",
+		"Stage files and commit using the current user's identity (name/email from person profile)",
+		tools.GitQuickCommitSchema(), tools.GitQuickCommit(s))
+	builder.RegisterTool("git_push",
+		"Push current branch to remote",
+		tools.GitPushSchema(), tools.GitPush(s))
+	builder.RegisterTool("git_pull",
+		"Pull from remote with optional rebase",
+		tools.GitPullSchema(), tools.GitPull(s))
+	builder.RegisterTool("git_merge_branch",
+		"Merge a branch into the current branch using person identity",
+		tools.GitMergeBranchSchema(), tools.GitMergeBranch(s))
+	builder.RegisterTool("git_status_summary",
+		"Show compact git status: branch, ahead/behind, staged/unstaged/untracked counts",
+		tools.GitStatusSummarySchema(), tools.GitStatusSummary(s))
+	builder.RegisterTool("git_create_branch",
+		"Create a new branch and switch to it",
+		tools.GitCreateBranchSchema(), tools.GitCreateBranch(s))
 }
