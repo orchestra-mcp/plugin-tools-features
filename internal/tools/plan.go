@@ -338,7 +338,7 @@ func BreakdownPlan(store *storage.FeatureStorage) ToolHandler {
 				ProjectID:   projectID,
 				Title:       def.Title,
 				Description: def.Description,
-				Status:      types.StatusBacklog,
+				Status:      types.StatusTodo,
 				Priority:    priority,
 				Kind:        kind,
 				Estimate:    def.Estimate,
@@ -460,5 +460,36 @@ func CompletePlan(store *storage.FeatureStorage) ToolHandler {
 
 		return helpers.TextResult(
 			fmt.Sprintf("Completed **%s** — all %d features done", planID, len(plan.Features))), nil
+	}
+}
+
+// DeletePlanSchema returns the JSON Schema for the delete_plan tool.
+func DeletePlanSchema() *structpb.Struct {
+	s, _ := structpb.NewStruct(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"project_id": map[string]any{"type": "string", "description": "Project slug"},
+			"plan_id":    map[string]any{"type": "string", "description": "Plan ID (e.g., PLAN-ABC)"},
+		},
+		"required": []any{"project_id", "plan_id"},
+	})
+	return s
+}
+
+// DeletePlan removes a plan from a project.
+func DeletePlan(store *storage.FeatureStorage) ToolHandler {
+	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
+		if err := helpers.ValidateRequired(req.Arguments, "project_id", "plan_id"); err != nil {
+			return helpers.ErrorResult("validation_error", err.Error()), nil
+		}
+
+		projectID := helpers.GetString(req.Arguments, "project_id")
+		planID := helpers.GetString(req.Arguments, "plan_id")
+
+		if err := store.DeletePlan(ctx, projectID, planID); err != nil {
+			return helpers.ErrorResult("storage_error", err.Error()), nil
+		}
+
+		return helpers.TextResult(fmt.Sprintf("Deleted plan: %s", planID)), nil
 	}
 }

@@ -69,7 +69,7 @@ func CreateBugReport(store *storage.FeatureStorage) ToolHandler {
 			ProjectID:   projectID,
 			Title:       title,
 			Description: description,
-			Status:      types.StatusBacklog,
+			Status:      types.StatusTodo,
 			Priority:    priority,
 			Kind:        types.KindBug,
 			Labels:      labels,

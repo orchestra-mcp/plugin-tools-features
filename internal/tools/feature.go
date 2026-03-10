@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
@@ -132,7 +133,7 @@ func CreateFeature(store *storage.FeatureStorage) ToolHandler {
 			ProjectID:   projectID,
 			Title:       title,
 			Description: description,
-			Status:      types.StatusBacklog,
+			Status:      types.StatusTodo,
 			Priority:    priority,
 			Kind:        types.FeatureKind(kind),
 			Version:     0,
@@ -169,7 +170,14 @@ func GetFeature(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("not_found", err.Error()), nil
 		}
 
-		md := helpers.FormatFeatureMD(feat) + "\n---\n\n" + body
+		md := helpers.FormatFeatureMD(feat)
+
+		// Show lock info if the feature is locked.
+		if lock, err := globaldb.GetLockInfo(projectID, featureID); err == nil && lock != nil {
+			md += fmt.Sprintf("- **Locked by session:** `%s` (since %s)\n", lock.SessionID, lock.LockedAt)
+		}
+
+		md += "\n---\n\n" + body
 		return helpers.TextResult(md), nil
 	}
 }

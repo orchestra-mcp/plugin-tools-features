@@ -3,11 +3,10 @@ package tools
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
-	"time"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
@@ -22,9 +21,10 @@ func AdvanceFeatureSchema() *structpb.Struct {
 		"properties": map[string]any{
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"feature_id": map[string]any{"type": "string", "description": "Feature ID"},
-			"evidence":   map[string]any{"type": "string", "description": "Evidence for gate transitions. Required for: in-progress->ready-for-testing, in-testing->ready-for-docs, in-docs->documented. Must include required ## sections. Call get_gate_requirements to see what is needed."},
+			"evidence":   map[string]any{"type": "string", "description": "Evidence with file paths proving the previous phase is complete. Required section depends on current status: ## Changes (from in-progress), ## Results (from in-testing), ## Docs (from in-docs)."},
+			"force":      map[string]any{"type": "boolean", "description": "Force advance even if file types don't match expected patterns (use after user approval via AskUserQuestion)"},
 		},
-		"required": []any{"project_id", "feature_id"},
+		"required": []any{"project_id", "feature_id", "evidence"},
 	})
 	return s
 }
@@ -83,25 +83,19 @@ func GetWorkflowStatusSchema() *structpb.Struct {
 // ---------- Helpers ----------
 
 // nextStepHint returns a markdown instruction for what the agent should do
-// next after a transition. This guides the agent through the full lifecycle.
+// next after a transition. Each status = exactly one activity.
 func nextStepHint(featureID string, newStatus types.FeatureStatus) string {
 	switch newStatus {
 	case types.StatusTodo:
-		return fmt.Sprintf("\n\n**Next step:** Call `set_current_feature` or `advance_feature` to start working on **%s**.", featureID)
+		return fmt.Sprintf("\n\n**Next step:** Call `set_current_feature` to start working on **%s**.", featureID)
 	case types.StatusInProgress:
-		return "\n\n**Next step:** Do the implementation work. When done, call `advance_feature` with evidence (sections: `## Summary`, `## Changes`, `## Verification`)."
-	case types.StatusReadyForTesting:
-		return fmt.Sprintf("\n\n**Next step:** Call `advance_feature` to move **%s** to in-testing, then run tests.", featureID)
+		return "\n\n**ALLOWED:** Write source code ONLY. Do NOT write tests. Do NOT write docs.\n\n**When done coding:** Call `advance_feature` with evidence listing files changed (section: `## Changes`)."
 	case types.StatusInTesting:
-		return "\n\n**Next step:** Run tests. When done, call `advance_feature` with evidence (sections: `## Summary`, `## Results`, `## Coverage`)."
-	case types.StatusReadyForDocs:
-		return fmt.Sprintf("\n\n**Next step:** Call `advance_feature` to move **%s** to in-docs, then write documentation.", featureID)
+		return "\n\n**ALLOWED:** Write test code and run tests ONLY. Do NOT write source code. Do NOT write docs.\n\n**When done testing:** Call `advance_feature` with evidence listing test files and results (section: `## Results`)."
 	case types.StatusInDocs:
-		return "\n\n**Next step:** Write documentation. When done, call `advance_feature` with evidence (sections: `## Summary`, `## Location`)."
-	case types.StatusDocumented:
-		return fmt.Sprintf("\n\n**Next step:** Call `request_review` with self-review evidence (sections: `## Summary`, `## Quality`, `## Checklist`). Then ask the user for approval via `AskUserQuestion`.")
+		return "\n\n**ALLOWED:** Write .md files in `/docs` folder ONLY. Do NOT write source code. Do NOT write tests.\n\n**When done documenting:** Call `advance_feature` with evidence listing doc files (section: `## Docs`)."
 	case types.StatusInReview:
-		return "\n\n**Next step:** Ask the user for approval via `AskUserQuestion`, then call `submit_review` with their decision."
+		return "\n\n**ALLOWED:** Ask user for approval via `AskUserQuestion` ONLY. Do NOTHING else.\n\n**After user responds:** Call `submit_review` with their decision."
 	case types.StatusNeedsEdits:
 		return fmt.Sprintf("\n\n**Next step:** Call `set_current_feature` to restart work on **%s**, then address the feedback.", featureID)
 	case types.StatusDone:
@@ -113,57 +107,42 @@ func nextStepHint(featureID string, newStatus types.FeatureStatus) string {
 
 // ---------- Handlers ----------
 
-// MinGateInterval is the minimum time that must pass between gated transitions.
-// This prevents agents from rapid-fire advancing through gates without doing
-// actual work (testing, documentation, review). Set to 30 seconds.
-// Exported as a variable so tests can override it.
-var MinGateInterval = 30 * time.Second
-
-// EscalatingCooldownWindow is the time window to look back for recent gate
-// passages. If multiple gates were passed within this window, the cooldown
-// escalates (doubles per extra gate). Set to 5 minutes.
-var EscalatingCooldownWindow = 5 * time.Minute
-
-// MaxEvidenceSimilarity is the maximum allowed Jaccard similarity (0.0-1.0)
-// between new evidence and any previous gate evidence in the feature body.
-// Evidence more similar than this threshold is rejected as likely copy-paste.
-var MaxEvidenceSimilarity = 0.6
-
-// gateTimestampPattern matches gate transition timestamps in the feature body.
-// Format: **status -> status** (2026-03-01T12:34:56Z):
-var gateTimestampPattern = regexp.MustCompile(`\*\*\w[\w-]* -> \w[\w-]*\*\* \((\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\)]*)\):`)
-
-// gateEvidencePattern splits the body into gate evidence blocks.
-// Each block starts with --- followed by **from -> to** (timestamp): and ends at the next ---.
-var gateEvidencePattern = regexp.MustCompile(`(?s)---\n\*\*\w[\w-]* -> \w[\w-]*\*\* \([^)]+\):\n(.+?)(?:\n---|\z)`)
-
 // AdvanceFeature advances a feature to the next valid status in the workflow.
-// Gated transitions require structured evidence with specific ## sections.
-// Call get_gate_requirements to see what is needed for the next transition.
-//
-// GUARDRAILS:
-// 1. Escalating cooldown: base 30s, doubles for each gate passed in last 5 min
-// 2. Evidence validation: sections, file paths, minimum lengths
-// 3. Evidence uniqueness: rejects copy-pasted evidence across gates
+// Every transition requires evidence with file paths proving the previous phase
+// is complete. File-type validation ensures test gates reference test files and
+// docs gates reference .md files in the docs/ folder.
 func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
-		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id"); err != nil {
+		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id", "evidence"); err != nil {
 			return helpers.ErrorResult("validation_error", err.Error()), nil
 		}
 
 		projectID := helpers.GetString(req.Arguments, "project_id")
 		featureID := helpers.GetString(req.Arguments, "feature_id")
 		evidence := helpers.GetString(req.Arguments, "evidence")
+		force := helpers.GetBool(req.Arguments, "force")
 
 		feat, body, version, err := store.ReadFeature(ctx, projectID, featureID)
 		if err != nil {
 			return helpers.ErrorResult("not_found", err.Error()), nil
 		}
 
+		// Migrate legacy statuses.
+		feat.Status = types.MigrateStatus(feat.Status)
+
 		// Block advance_feature from in-review; must use submit_review instead.
 		if feat.Status == types.StatusInReview {
 			return helpers.ErrorResult("gate_blocked",
-				"Cannot advance from **in-review** using advance_feature. Use the **submit_review** tool to approve or reject. The user must approve the review via AskUserQuestion before calling submit_review."), nil
+				"Cannot advance from **in-review** using advance_feature. Use **submit_review** to approve or reject. Ask the user first via AskUserQuestion."), nil
+		}
+
+		// SESSION LOCK CHECK: verify this session owns the feature.
+		sessionID := req.GetSessionId()
+		if sessionID != "" {
+			if err := globaldb.CheckLock(projectID, featureID, sessionID); err != nil {
+				return helpers.ErrorResult("session_lock", err.Error()), nil
+			}
+			globaldb.RefreshLock(projectID, featureID, sessionID)
 		}
 
 		nextStatuses := types.NextStatuses(feat.Status)
@@ -172,74 +151,58 @@ func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
 				fmt.Sprintf("feature %s is in terminal status %q and cannot be advanced", featureID, feat.Status)), nil
 		}
 
-		// Take the first valid transition (the "happy path").
+		// Determine target status.
 		newStatus := nextStatuses[0]
 		oldStatus := feat.Status
 
-		// Check if this transition is gated.
+		// For bugs/hotfixes/testcases in-testing: skip docs, go to in-review.
+		if oldStatus == types.StatusInTesting && len(nextStatuses) > 1 {
+			kind := feat.Kind
+			if kind == "" {
+				kind = types.KindFeature
+			}
+			if kind == types.KindBug || kind == types.KindHotfix || kind == types.KindTestcase {
+				newStatus = types.StatusInReview
+			}
+		}
+
+		// Check gate.
 		gate := types.GetGate(oldStatus, newStatus)
 		if gate != nil {
 			if gate.IsSkippableFor(feat.Kind) {
-				// Auto-pass: append a note that the gate was skipped for this kind.
 				body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s): Gate skipped for kind=%s\n", oldStatus, newStatus, helpers.NowISO(), feat.Kind)
 			} else {
-				// GUARDRAIL 1: Enforce escalating cooldown between gated transitions.
-				// Base cooldown is MinGateInterval. If multiple gates were passed
-				// within EscalatingCooldownWindow, the cooldown doubles per extra gate.
-				requiredCooldown := calculateEscalatingCooldown(body, MinGateInterval)
-				if elapsed, ok := timeSinceUpdate(feat.UpdatedAt); ok && elapsed < requiredCooldown {
-					remaining := requiredCooldown - elapsed
-					escalationNote := ""
-					if requiredCooldown > MinGateInterval {
-						escalationNote = fmt.Sprintf("\n\n**Escalated cooldown:** Multiple gates passed recently. "+
-							"Cooldown increased from %s to **%s**. "+
-							"Do real work between gates instead of using sleep/wait.",
-							MinGateInterval, requiredCooldown.Round(time.Second))
-					}
-					return helpers.ErrorResult("gate_cooldown",
-						fmt.Sprintf("## Gate Cooldown\n\n"+
-							"Cannot advance **%s** yet -- only **%s** since the last status change.\n\n"+
-							"Gated transitions require at least **%s** between advances to ensure "+
-							"actual work (testing, documentation, review) is performed.\n\n"+
-							"Do NOT use `sleep` or `wait` to bypass this cooldown. "+
-							"Do the required work (run tests, write docs, review code) instead.\n\n"+
-							"Remaining: **%s**%s",
-							featureID,
-							elapsed.Round(time.Second),
-							requiredCooldown.Round(time.Second),
-							remaining.Round(time.Second),
-							escalationNote)), nil
-				}
-
-				// GUARDRAIL 2: Validate evidence structure and content.
+				// Validate evidence structure.
 				if err := gate.Validate(evidence); err != nil {
-					msg := fmt.Sprintf("## Gate Blocked: %s\n\n**%s**\n\n%s",
-						gate.Name, err.Error(), gate.Checklist)
-					return helpers.ErrorResult("gate_blocked", msg), nil
+					return helpers.ErrorResult("gate_blocked",
+						fmt.Sprintf("## Gate Blocked: %s\n\n%s", gate.Name, err.Error())), nil
 				}
 
-				// GUARDRAIL 3: Evidence uniqueness -- reject copy-pasted evidence.
-				if similarity := maxPriorEvidenceSimilarity(body, evidence); similarity > MaxEvidenceSimilarity {
-					return helpers.ErrorResult("evidence_duplicate",
-						fmt.Sprintf("## Evidence Too Similar\n\n"+
-							"The evidence provided is **%.0f%% similar** to evidence from a previous gate.\n\n"+
-							"Each gate requires **unique, specific evidence** reflecting the actual work done "+
-							"at that stage (implementation, testing, documentation). "+
-							"Copy-pasting or templating evidence across gates is not allowed.\n\n"+
-							"Write evidence that describes what you specifically did for THIS gate.",
-							similarity*100)), nil
+				// File-type validation (unless force=true after user approval).
+				if !force {
+					ok, expected := gate.CheckFileTypes(evidence)
+					if !ok {
+						return helpers.ErrorResult("needs_approval",
+							fmt.Sprintf("## File Type Mismatch\n\n"+
+								"Evidence for **%s** gate references files that don't match expected patterns.\n\n"+
+								"**Expected:** %s\n\n"+
+								"Ask the user to confirm via `AskUserQuestion`, then retry with `force: true`.",
+								gate.Name, strings.Join(expected, ", "))), nil
+					}
 				}
 
 				// Append evidence to body.
 				body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s):\n%s\n", oldStatus, newStatus, helpers.NowISO(), evidence)
 			}
-		} else if evidence != "" {
-			// Free transition but evidence was provided anyway.
-			body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s):\n%s\n", oldStatus, newStatus, helpers.NowISO(), evidence)
 		}
 
 		feat.Status = newStatus
 		feat.UpdatedAt = helpers.NowISO()
+
+		// Release session lock when feature reaches done.
+		if newStatus == types.StatusDone && sessionID != "" {
+			globaldb.ReleaseLock(projectID, featureID)
+		}
 
 		_, err = store.WriteFeature(ctx, projectID, featureID, feat, body, version)
 		if err != nil {
@@ -250,170 +213,6 @@ func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
 		msg += nextStepHint(featureID, newStatus)
 		return helpers.TextResult(msg), nil
 	}
-}
-
-// calculateEscalatingCooldown parses recent gate timestamps from the feature
-// body and returns an escalated cooldown duration. For each gate passed within
-// EscalatingCooldownWindow, the cooldown doubles. This prevents agents from
-// using sleep(30) between each gate to rapidly advance through the workflow.
-//
-// Examples (with 30s base, 5min window):
-//   - 0 recent gates: 30s (base)
-//   - 1 recent gate: 60s (doubled once)
-//   - 2 recent gates: 120s (doubled twice)
-//   - 3 recent gates: 240s (doubled three times)
-func calculateEscalatingCooldown(body string, baseCooldown time.Duration) time.Duration {
-	if baseCooldown == 0 || EscalatingCooldownWindow == 0 {
-		return baseCooldown // tests disable cooldown
-	}
-
-	now := time.Now()
-	cutoff := now.Add(-EscalatingCooldownWindow)
-
-	matches := gateTimestampPattern.FindAllStringSubmatch(body, -1)
-	recentCount := 0
-	for _, m := range matches {
-		if len(m) < 2 {
-			continue
-		}
-		t, err := time.Parse(time.RFC3339, m[1])
-		if err != nil {
-			t, err = time.Parse("2006-01-02T15:04:05", m[1])
-			if err != nil {
-				continue
-			}
-		}
-		if t.After(cutoff) {
-			recentCount++
-		}
-	}
-
-	// Double the cooldown for each recent gate passage.
-	cooldown := baseCooldown
-	for i := 0; i < recentCount; i++ {
-		cooldown *= 2
-	}
-
-	// Cap at 10 minutes to avoid absurd waits.
-	maxCooldown := 10 * time.Minute
-	if cooldown > maxCooldown {
-		cooldown = maxCooldown
-	}
-
-	return cooldown
-}
-
-// maxPriorEvidenceSimilarity extracts previous gate evidence blocks from the
-// feature body and computes the maximum Jaccard similarity between any prior
-// block and the new evidence. Returns 0.0 if no prior evidence exists.
-func maxPriorEvidenceSimilarity(body, newEvidence string) float64 {
-	if body == "" || newEvidence == "" {
-		return 0
-	}
-
-	matches := gateEvidencePattern.FindAllStringSubmatch(body, -1)
-	if len(matches) == 0 {
-		return 0
-	}
-
-	newWords := tokenize(newEvidence)
-	if len(newWords) == 0 {
-		return 0
-	}
-
-	maxSim := 0.0
-	for _, m := range matches {
-		if len(m) < 2 {
-			continue
-		}
-		priorWords := tokenize(m[1])
-		if len(priorWords) == 0 {
-			continue
-		}
-		sim := jaccardSimilarity(newWords, priorWords)
-		if sim > maxSim {
-			maxSim = sim
-		}
-	}
-
-	return maxSim
-}
-
-// tokenize splits text into lowercase word tokens, filtering out markdown
-// syntax, punctuation, and common stop words. Used for evidence comparison.
-func tokenize(text string) map[string]bool {
-	words := make(map[string]bool)
-	// Split on non-alphanumeric characters.
-	for _, word := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' || r == '/')
-	}) {
-		// Skip very short words and common stop words.
-		if len(word) <= 2 {
-			continue
-		}
-		if isStopWord(word) {
-			continue
-		}
-		words[word] = true
-	}
-	return words
-}
-
-// isStopWord returns true for common English stop words that should be excluded
-// from evidence similarity comparison.
-func isStopWord(w string) bool {
-	stops := map[string]bool{
-		"the": true, "and": true, "for": true, "with": true, "that": true,
-		"this": true, "from": true, "are": true, "was": true, "were": true,
-		"has": true, "have": true, "had": true, "been": true, "being": true,
-		"not": true, "all": true, "can": true, "but": true, "will": true,
-	}
-	return stops[w]
-}
-
-// jaccardSimilarity computes the Jaccard index between two word sets:
-// |intersection| / |union|. Returns 0.0 to 1.0.
-func jaccardSimilarity(a, b map[string]bool) float64 {
-	if len(a) == 0 && len(b) == 0 {
-		return 0
-	}
-
-	intersection := 0
-	for w := range a {
-		if b[w] {
-			intersection++
-		}
-	}
-
-	union := len(a)
-	for w := range b {
-		if !a[w] {
-			union++
-		}
-	}
-
-	if union == 0 {
-		return 0
-	}
-	return float64(intersection) / float64(union)
-}
-
-// timeSinceUpdate parses the feature's UpdatedAt ISO timestamp and returns the
-// duration since that time. Returns (0, false) if the timestamp is empty or
-// unparseable, allowing the transition to proceed (fail-open for legacy data).
-func timeSinceUpdate(updatedAt string) (time.Duration, bool) {
-	if updatedAt == "" {
-		return 0, false
-	}
-	t, err := time.Parse(time.RFC3339, updatedAt)
-	if err != nil {
-		// Try alternate ISO format without timezone.
-		t, err = time.Parse("2006-01-02T15:04:05", updatedAt)
-		if err != nil {
-			return 0, false
-		}
-	}
-	return time.Since(t), true
 }
 
 // RejectFeature sets a feature's status to needs-edits.
@@ -471,12 +270,10 @@ func GetNextFeature(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("storage_error", err.Error()), nil
 		}
 
-		// Default: find features in "todo" status.
 		if statusFilter == "" {
 			statusFilter = string(types.StatusTodo)
 		}
 
-		// Priority order: P0 > P1 > P2 > P3.
 		priorityRank := map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 		var best *types.FeatureData
@@ -519,9 +316,12 @@ func GetNextFeature(store *storage.FeatureStorage) ToolHandler {
 }
 
 // SetCurrentFeature sets a feature's status to in-progress.
-// If the feature is in backlog, it auto-advances through todo first.
-// GUARDRAIL: Blocks if the same assignee (or unassigned) already has an active
-// feature. Different assignees (parallel agents) can each work on one feature.
+// Only valid from todo or needs-edits status.
+//
+// GUARDRAILS:
+// - Model capability check (S/M/L/XL vs model tier)
+// - One feature at a time per assignee
+// - Session lock acquisition
 func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id"); err != nil {
@@ -537,9 +337,10 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("not_found", err.Error()), nil
 		}
 
+		// Migrate legacy statuses.
+		feat.Status = types.MigrateStatus(feat.Status)
+
 		// GUARDRAIL: Model capability check.
-		// If the agent declares its model and the feature has an estimate,
-		// verify the model can handle features of that size.
 		if model != "" && feat.Estimate != "" {
 			if err := validateModelCapability(model, feat.Estimate); err != nil {
 				return helpers.ErrorResult("model_capability",
@@ -551,9 +352,6 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		// GUARDRAIL: One feature at a time per assignee.
-		// An agent can only have one active feature. If the target feature has an
-		// assignee, we check for other active features with that same assignee.
-		// If unassigned, we check for any unassigned active features.
 		allFeatures, err := store.ListFeatures(ctx, projectID)
 		if err != nil {
 			return helpers.ErrorResult("storage_error", err.Error()), nil
@@ -565,7 +363,6 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 			if !isActiveStatus(f.Status) {
 				continue
 			}
-			// Same assignee scope: both unassigned, or both assigned to the same person.
 			if feat.Assignee == f.Assignee {
 				assigneeMsg := "unassigned"
 				if feat.Assignee != "" {
@@ -573,21 +370,25 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 				}
 				return helpers.ErrorResult("wip_violation",
 					fmt.Sprintf("Cannot start **%s** -- feature **%s** (%s) is already **%s** for %s. "+
-						"Finish it through its full lifecycle (-> done) before starting another feature. "+
-						"One feature at a time per agent/assignee.",
+						"Finish it through its full lifecycle (-> done) before starting another feature.",
 						featureID, f.ID, f.Title, f.Status, assigneeMsg)), nil
 			}
 		}
 
-		// Auto-advance from backlog -> todo so the next transition to in-progress is valid.
-		if feat.Status == types.StatusBacklog {
-			feat.Status = types.StatusTodo
-			feat.UpdatedAt = helpers.NowISO()
-		}
-
 		if !types.CanTransition(feat.Status, types.StatusInProgress) {
 			return helpers.ErrorResult("workflow_error",
-				fmt.Sprintf("cannot set to in-progress from status %q", feat.Status)), nil
+				fmt.Sprintf("cannot set to in-progress from status %q — feature must be in 'todo' or 'needs-edits'", feat.Status)), nil
+		}
+
+		// SESSION LOCK: acquire exclusive lock for this session.
+		sessionID := req.GetSessionId()
+		if sessionID != "" {
+			if err := globaldb.AcquireLock(projectID, featureID, sessionID); err != nil {
+				return helpers.ErrorResult("session_lock",
+					fmt.Sprintf("Cannot start **%s** -- it is locked by another session. "+
+						"Wait for the other session to finish or call `unlock_feature` to force-release. %v",
+						featureID, err)), nil
+			}
 		}
 
 		oldStatus := feat.Status
@@ -609,95 +410,62 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 	}
 }
 
-// isActiveStatus returns true if the feature is in a "work in progress" state
-// (anywhere between in-progress and in-review, inclusive). Features in these
-// states must be completed before another feature can be started.
+// isActiveStatus returns true if the feature is in a "work in progress" state.
 func isActiveStatus(s types.FeatureStatus) bool {
 	switch s {
-	case types.StatusInProgress, types.StatusReadyForTesting, types.StatusInTesting,
-		types.StatusReadyForDocs, types.StatusInDocs, types.StatusDocumented,
-		types.StatusInReview:
+	case types.StatusInProgress, types.StatusInTesting, types.StatusInDocs, types.StatusInReview:
 		return true
 	}
 	return false
 }
 
-// modelTier maps model name patterns to capability tiers.
-// Higher tier = more capable. Tier determines max feature estimate.
+// ---------- Model capability validation ----------
+
 type modelTier struct {
-	pattern     string // substring to match in model name
-	tier        int    // 1=small, 2=medium, 3=large
+	pattern     string
+	tier        int
 	displayName string
 }
 
-// Model capability tiers -- maps model patterns to max estimate they can handle.
-// Tier 1 (Haiku-class): S only
-// Tier 2 (Sonnet-class): S, M
-// Tier 3 (Opus-class): S, M, L, XL
 var modelTiers = []modelTier{
-	// Opus-class (tier 3)
 	{pattern: "opus", tier: 3, displayName: "Opus"},
-	// Sonnet-class (tier 2)
 	{pattern: "sonnet", tier: 2, displayName: "Sonnet"},
-	// Haiku-class (tier 1)
 	{pattern: "haiku", tier: 1, displayName: "Haiku"},
-	// GPT-4 class (tier 3)
 	{pattern: "gpt-4o", tier: 2, displayName: "GPT-4o"},
 	{pattern: "gpt-4", tier: 3, displayName: "GPT-4"},
-	// GPT-3.5 class (tier 1)
 	{pattern: "gpt-3", tier: 1, displayName: "GPT-3.5"},
-	// Gemini
 	{pattern: "gemini-ultra", tier: 3, displayName: "Gemini Ultra"},
 	{pattern: "gemini-pro", tier: 2, displayName: "Gemini Pro"},
 	{pattern: "gemini-flash", tier: 1, displayName: "Gemini Flash"},
 }
 
-// estimateTierRequired maps estimate sizes to minimum model tier.
 var estimateTierRequired = map[string]int{
-	"S":  1, // any model
-	"M":  2, // sonnet or better
-	"L":  3, // opus or better
-	"XL": 3, // opus or better
+	"S": 1, "M": 2, "L": 3, "XL": 3,
 }
 
-// validateModelCapability checks if the given model can handle a feature of the
-// given estimate size. Returns an error if the model is too small.
 func validateModelCapability(model, estimate string) error {
 	requiredTier, ok := estimateTierRequired[estimate]
 	if !ok {
-		return nil // unknown estimate, allow
+		return nil
 	}
 
-	// Find the model's tier by substring matching.
 	modelLower := strings.ToLower(model)
 	for _, mt := range modelTiers {
 		if strings.Contains(modelLower, mt.pattern) {
 			if mt.tier < requiredTier {
 				tierNames := map[int]string{1: "S only", 2: "S, M", 3: "S, M, L, XL"}
 				return fmt.Errorf(
-					"Model **%s** (%s-class, handles %s) is not capable enough for estimate **%s**. "+
-						"Features sized %s require a tier %d model (e.g., %s).",
-					model, mt.displayName, tierNames[mt.tier],
-					estimate, estimate, requiredTier,
-					tierSuggestion(requiredTier))
+					"Model **%s** (%s-class, handles %s) is not capable enough for estimate **%s**.",
+					model, mt.displayName, tierNames[mt.tier], estimate)
 			}
-			return nil // model is capable enough
+			return nil
 		}
 	}
 
-	return nil // unknown model, allow (fail-open)
+	return nil
 }
 
-func tierSuggestion(tier int) string {
-	switch tier {
-	case 2:
-		return "Sonnet, GPT-4o, Gemini Pro"
-	case 3:
-		return "Opus, GPT-4, Gemini Ultra"
-	default:
-		return "any model"
-	}
-}
+// ---------- Gate Requirements ----------
 
 func GetGateRequirementsSchema() *structpb.Struct {
 	s, _ := structpb.NewStruct(map[string]any{
@@ -711,9 +479,6 @@ func GetGateRequirementsSchema() *structpb.Struct {
 	return s
 }
 
-// GetGateRequirements returns the gate requirements for the next transition of
-// a feature. If the next transition is free (no gate), it says so. If the
-// feature is in-review, it directs to submit_review.
 func GetGateRequirements(store *storage.FeatureStorage) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id"); err != nil {
@@ -728,31 +493,18 @@ func GetGateRequirements(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("not_found", err.Error()), nil
 		}
 
-		// Terminal status.
+		feat.Status = types.MigrateStatus(feat.Status)
+
 		nextStatuses := types.NextStatuses(feat.Status)
 		if len(nextStatuses) == 0 {
 			return helpers.TextResult(fmt.Sprintf(
-				"Feature **%s** is in terminal status **%s** and cannot be advanced.",
-				featureID, feat.Status)), nil
+				"Feature **%s** is in terminal status **%s**.", featureID, feat.Status)), nil
 		}
 
-		// In-review: must use submit_review.
 		if feat.Status == types.StatusInReview {
 			return helpers.TextResult(fmt.Sprintf(
-				`Feature **%s** is **in-review**.
-
-Use the **submit_review** tool (not advance_feature) to approve or reject.
-
-**Important:** You MUST ask the user for approval via **AskUserQuestion** before calling submit_review.
-Present the feature details and self-review evidence, then call submit_review with the user's decision.`,
-				featureID)), nil
-		}
-
-		// Documented: must use request_review.
-		if feat.Status == types.StatusDocumented {
-			return helpers.TextResult(fmt.Sprintf(
-				"Feature **%s** is **documented**. Use the **request_review** tool to request a human review.\n\n%s",
-				featureID, types.ReviewGate.Checklist)), nil
+				"Feature **%s** is **in-review**. Use `submit_review` (not advance_feature). "+
+					"You MUST ask the user via `AskUserQuestion` first.", featureID)), nil
 		}
 
 		nextStatus := nextStatuses[0]
@@ -760,13 +512,24 @@ Present the feature details and self-review evidence, then call submit_review wi
 
 		if gate == nil {
 			return helpers.TextResult(fmt.Sprintf(
-				"Feature **%s** is **%s**. The next transition to **%s** is **free** -- you can call advance_feature without evidence.",
+				"Feature **%s** is **%s**. Next transition to **%s** is free — call advance_feature.",
 				featureID, feat.Status, nextStatus)), nil
 		}
 
-		return helpers.TextResult(fmt.Sprintf(
-			"Feature **%s** is **%s**. The next transition to **%s** requires passing a gate:\n\n%s",
-			featureID, feat.Status, nextStatus, gate.Checklist)), nil
+		msg := fmt.Sprintf("Feature **%s** is **%s**. Next transition to **%s** requires:\n\n"+
+			"- Section: `## %s`\n"+
+			"- Must include at least %d file path(s)\n",
+			featureID, feat.Status, nextStatus, gate.RequiredSection, gate.MinFilePaths)
+
+		if len(gate.FilePatterns) > 0 {
+			msg += fmt.Sprintf("- File types expected: %s\n", strings.Join(gate.FilePatterns, ", "))
+			msg += "- If files don't match patterns, user approval is needed (force: true)\n"
+		}
+		if gate.DocsFolder != "" {
+			msg += fmt.Sprintf("- Files must be in `%s/` folder\n", gate.DocsFolder)
+		}
+
+		return helpers.TextResult(msg), nil
 	}
 }
 

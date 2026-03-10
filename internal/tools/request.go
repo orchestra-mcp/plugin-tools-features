@@ -254,7 +254,7 @@ func ConvertRequest(store *storage.FeatureStorage) ToolHandler {
 			ProjectID:   projectID,
 			Title:       r.Title,
 			Description: r.Description,
-			Status:      types.StatusBacklog,
+			Status:      types.StatusTodo,
 			Priority:    r.Priority,
 			Kind:        types.FeatureKind(r.Kind),
 			Labels:      []string{fmt.Sprintf("request:%s", requestID)},

@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -12,15 +11,6 @@ import (
 	"github.com/orchestra-mcp/plugin-tools-features/internal/tools"
 	"google.golang.org/protobuf/types/known/structpb"
 )
-
-// TestMain disables the gate cooldown and related guardrails for all tests so
-// they can advance features through gates instantly without waiting.
-func TestMain(m *testing.M) {
-	tools.MinGateInterval = 0
-	tools.EscalatingCooldownWindow = 0
-	tools.MaxEvidenceSimilarity = 1.0 // disable similarity check in tests
-	os.Exit(m.Run())
-}
 
 // testEnv sets up an in-memory storage backend and returns the feature storage
 // wrapper plus a context.
@@ -95,6 +85,74 @@ func createTestFeature(t *testing.T, store *storage.FeatureStorage, projectID, t
 	return id
 }
 
+// createTestFeatureWithKind creates a feature with a specific kind and returns the feature ID.
+func createTestFeatureWithKind(t *testing.T, store *storage.FeatureStorage, projectID, title, kind string) string {
+	t.Helper()
+	resp := callTool(t, tools.CreateFeature(store), map[string]any{
+		"project_id": projectID,
+		"title":      title,
+		"kind":       kind,
+	})
+	if !resp.Success {
+		t.Fatalf("create_feature (kind=%s) failed: %s", kind, resp.ErrorMessage)
+	}
+	text := resultText(t, resp)
+	id := featureIDPattern.FindString(text)
+	if id == "" {
+		t.Fatal("create_feature did not return a feature ID in the text")
+	}
+	return id
+}
+
+// Gate evidence constants for the new simplified workflow.
+const (
+	// Gate: in-progress -> in-testing (Code Complete gate, requires ## Changes with file paths).
+	codeCompleteEvidence = "## Changes\n- src/handler.go (added new endpoint for authentication)\n- src/service.go (business logic for token validation)\n- src/models.go (new user model fields)"
+
+	// Gate: in-testing -> in-docs (Test Complete gate, requires ## Results with test file paths).
+	testCompleteEvidence = "## Results\n- src/handler_test.go (12 test cases, all passing)\n- src/service_test.go (8 test cases covering edge cases)\n\nAll tests pass with 87% coverage."
+
+	// Gate: in-docs -> in-review (Docs Complete gate, requires ## Docs with .md files in docs/ folder).
+	docsCompleteEvidence = "## Docs\n- docs/api/authentication.md (full API reference)\n- docs/guides/setup.md (setup instructions updated)"
+)
+
+// advanceWithGateEvidence is a test helper that advances a feature through a
+// transition, providing the correct gate evidence for gated transitions.
+func advanceWithGateEvidence(t *testing.T, store *storage.FeatureStorage, projectID, featureID, from string) {
+	t.Helper()
+	args := map[string]any{
+		"project_id": projectID,
+		"feature_id": featureID,
+	}
+	switch from {
+	case "in-progress":
+		args["evidence"] = codeCompleteEvidence
+	case "in-testing":
+		args["evidence"] = testCompleteEvidence
+	case "in-docs":
+		args["evidence"] = docsCompleteEvidence
+	default:
+		// All transitions via advance_feature require evidence now.
+		args["evidence"] = "## Changes\n- placeholder/file.go (transition evidence)"
+	}
+	resp := callTool(t, tools.AdvanceFeature(store), args)
+	if !resp.Success {
+		t.Fatalf("advance from %s failed: %s", from, resp.ErrorMessage)
+	}
+}
+
+// startFeature uses set_current_feature to move a feature from todo to in-progress.
+func startFeature(t *testing.T, store *storage.FeatureStorage, projectID, featureID string) {
+	t.Helper()
+	resp := callTool(t, tools.SetCurrentFeature(store), map[string]any{
+		"project_id": projectID,
+		"feature_id": featureID,
+	})
+	if !resp.Success {
+		t.Fatalf("set_current_feature failed: %s", resp.ErrorMessage)
+	}
+}
+
 func TestCreateAndGetProject(t *testing.T) {
 	store, _ := testEnv()
 
@@ -156,8 +214,9 @@ func TestCreateAndGetFeature(t *testing.T) {
 		t.Fatal("create_feature did not return a feature ID")
 	}
 
-	if !strings.Contains(text, "backlog") {
-		t.Errorf("expected status backlog in result, got:\n%s", text)
+	// Features now start in "todo" status (not "backlog").
+	if !strings.Contains(text, "todo") {
+		t.Errorf("expected status todo in result, got:\n%s", text)
 	}
 	if !strings.Contains(text, "P0") {
 		t.Errorf("expected priority P0 in result, got:\n%s", text)
@@ -223,65 +282,25 @@ func TestListFeatures(t *testing.T) {
 	}
 }
 
-// Gate evidence constants for tests.
-const (
-	gate1Evidence = "## Summary\nImplemented the full feature with all requirements.\n\n## Changes\n- handler.go: Added endpoint\n- service.go: Business logic\n\n## Verification\nCall the API endpoint and verify the response."
-	gate2Evidence = "## Summary\nTested all endpoints and edge cases thoroughly.\n\n## Results\nAll 12 test cases passed without failures.\n\n## Coverage\n87% line coverage across the module."
-	gate3Evidence = "## Summary\nDocumented all endpoints and configuration options.\n\n## Location\ndocs/api/feature.md and README.md updated."
-	reviewEvidence = "## Summary\nFeature implements the full requirements.\n\n## Quality\nCode follows conventions, no known issues or concerns.\n\n## Checklist\n- [x] handler.go — all endpoints implemented\n- [x] handler_test.go — tests written and passing\n- [x] docs/api/feature.md — docs complete"
-)
-
-// advanceWithGateEvidence is a test helper that advances a feature through a
-// transition, providing the correct gate evidence for gated transitions.
-func advanceWithGateEvidence(t *testing.T, store *storage.FeatureStorage, projectID, featureID, from string) {
-	t.Helper()
-	args := map[string]any{
-		"project_id": projectID,
-		"feature_id": featureID,
-	}
-	// Provide evidence for gated transitions.
-	switch from {
-	case "in-progress":
-		args["evidence"] = gate1Evidence
-	case "in-testing":
-		args["evidence"] = gate2Evidence
-	case "in-docs":
-		args["evidence"] = gate3Evidence
-	}
-	resp := callTool(t, tools.AdvanceFeature(store), args)
-	if !resp.Success {
-		t.Fatalf("advance from %s failed: %s", from, resp.ErrorMessage)
-	}
-}
-
 func TestWorkflowAdvance(t *testing.T) {
 	store, _ := testEnv()
 	createTestProject(t, store, "Workflow Test")
 	featureID := createTestFeature(t, store, "workflow-test", "Auth Feature")
 
-	// Advance through: backlog -> todo -> in-progress -> ready-for-testing
-	// -> in-testing -> ready-for-docs -> in-docs -> documented
-	// Gates 1-3 require evidence; the rest are free.
-	advanceSteps := []string{
-		"backlog", "todo", "in-progress", "ready-for-testing",
-		"in-testing", "ready-for-docs", "in-docs",
-	}
-	for _, from := range advanceSteps {
-		advanceWithGateEvidence(t, store, "workflow-test", featureID, from)
-	}
+	// Feature starts as todo. Use set_current_feature to move to in-progress.
+	startFeature(t, store, "workflow-test", featureID)
 
-	// documented -> in-review uses request_review (with self-review evidence).
-	resp := callTool(t, tools.RequestReview(store), map[string]any{
-		"project_id": "workflow-test",
-		"feature_id": featureID,
-		"evidence":   reviewEvidence,
-	})
-	if !resp.Success {
-		t.Fatalf("request_review failed: %s", resp.ErrorMessage)
-	}
+	// in-progress -> in-testing (Code Complete gate: ## Changes with file paths).
+	advanceWithGateEvidence(t, store, "workflow-test", featureID, "in-progress")
+
+	// in-testing -> in-docs (Test Complete gate: ## Results with test file paths).
+	advanceWithGateEvidence(t, store, "workflow-test", featureID, "in-testing")
+
+	// in-docs -> in-review (Docs Complete gate: ## Docs with .md files in docs/).
+	advanceWithGateEvidence(t, store, "workflow-test", featureID, "in-docs")
 
 	// in-review -> done uses submit_review (not advance_feature).
-	resp = callTool(t, tools.SubmitReview(store), map[string]any{
+	resp := callTool(t, tools.SubmitReview(store), map[string]any{
 		"project_id": "workflow-test",
 		"feature_id": featureID,
 		"status":     "approved",
@@ -295,10 +314,11 @@ func TestWorkflowAdvance(t *testing.T) {
 		t.Errorf("expected 'done' in submit_review result, got:\n%s", text)
 	}
 
-	// Advancing from done should fail.
+	// Advancing from done should fail (evidence is required but status is terminal).
 	resp = callTool(t, tools.AdvanceFeature(store), map[string]any{
 		"project_id": "workflow-test",
 		"feature_id": featureID,
+		"evidence":   "## Changes\n- some/file.go (trying to advance from done)",
 	})
 	if resp.Success {
 		t.Error("expected advance from done to fail")
@@ -313,27 +333,14 @@ func TestWorkflowReject(t *testing.T) {
 	createTestProject(t, store, "Reject Test")
 	featureID := createTestFeature(t, store, "reject-test", "Rejectable Feature")
 
-	// Advance to documented (7 transitions with gate evidence).
-	advanceSteps := []string{
-		"backlog", "todo", "in-progress", "ready-for-testing",
-		"in-testing", "ready-for-docs", "in-docs",
-	}
-	for _, from := range advanceSteps {
-		advanceWithGateEvidence(t, store, "reject-test", featureID, from)
-	}
-
-	// documented -> in-review via request_review with self-review evidence.
-	resp := callTool(t, tools.RequestReview(store), map[string]any{
-		"project_id": "reject-test",
-		"feature_id": featureID,
-		"evidence":   reviewEvidence,
-	})
-	if !resp.Success {
-		t.Fatalf("request_review failed: %s", resp.ErrorMessage)
-	}
+	// Move through full workflow to in-review.
+	startFeature(t, store, "reject-test", featureID)
+	advanceWithGateEvidence(t, store, "reject-test", featureID, "in-progress")
+	advanceWithGateEvidence(t, store, "reject-test", featureID, "in-testing")
+	advanceWithGateEvidence(t, store, "reject-test", featureID, "in-docs")
 
 	// Reject from in-review.
-	resp = callTool(t, tools.RejectFeature(store), map[string]any{
+	resp := callTool(t, tools.RejectFeature(store), map[string]any{
 		"project_id": "reject-test",
 		"feature_id": featureID,
 		"reason":     "Missing error handling",
@@ -349,7 +356,7 @@ func TestWorkflowReject(t *testing.T) {
 		t.Errorf("expected 'needs-edits' in rejection text, got:\n%s", text)
 	}
 
-	// From needs-edits, can go back to in-progress.
+	// From needs-edits, can go back to in-progress via set_current_feature.
 	resp = callTool(t, tools.SetCurrentFeature(store), map[string]any{
 		"project_id": "reject-test",
 		"feature_id": featureID,
@@ -719,7 +726,7 @@ func TestDeleteFeature(t *testing.T) {
 func TestGetNextFeature(t *testing.T) {
 	store, _ := testEnv()
 	createTestProject(t, store, "Next Test")
-	id1 := createTestFeature(t, store, "next-test", "Low Priority Feature")
+	_ = createTestFeature(t, store, "next-test", "Low Priority Feature")
 	id2 := createTestFeature(t, store, "next-test", "High Priority Feature")
 
 	// Set one feature to P0.
@@ -729,17 +736,8 @@ func TestGetNextFeature(t *testing.T) {
 		"priority":   "P0",
 	})
 
-	// Advance both to todo (from backlog).
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "next-test",
-		"feature_id": id1,
-	})
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "next-test",
-		"feature_id": id2,
-	})
-
-	// Get next feature should return the P0 one.
+	// Features already start as todo, so get_next_feature (which defaults to
+	// filtering by todo status) should find them immediately.
 	resp := callTool(t, tools.GetNextFeature(store), map[string]any{
 		"project_id": "next-test",
 	})
@@ -760,27 +758,14 @@ func TestReviewWorkflow(t *testing.T) {
 	createTestProject(t, store, "Review Test")
 	featureID := createTestFeature(t, store, "review-test", "Reviewable Feature")
 
-	// Advance to documented (7 transitions with gate evidence).
-	advanceSteps := []string{
-		"backlog", "todo", "in-progress", "ready-for-testing",
-		"in-testing", "ready-for-docs", "in-docs",
-	}
-	for _, from := range advanceSteps {
-		advanceWithGateEvidence(t, store, "review-test", featureID, from)
-	}
+	// Move through full workflow to in-review.
+	startFeature(t, store, "review-test", featureID)
+	advanceWithGateEvidence(t, store, "review-test", featureID, "in-progress")
+	advanceWithGateEvidence(t, store, "review-test", featureID, "in-testing")
+	advanceWithGateEvidence(t, store, "review-test", featureID, "in-docs")
 
-	// Request review with self-review evidence.
-	resp := callTool(t, tools.RequestReview(store), map[string]any{
-		"project_id": "review-test",
-		"feature_id": featureID,
-		"evidence":   reviewEvidence,
-	})
-	if !resp.Success {
-		t.Fatalf("request_review failed: %s", resp.ErrorMessage)
-	}
-
-	// Check pending reviews.
-	resp = callTool(t, tools.GetPendingReviews(store), map[string]any{
+	// Check pending reviews -- feature should be in-review now.
+	resp := callTool(t, tools.GetPendingReviews(store), map[string]any{
 		"project_id": "review-test",
 	})
 	if !resp.Success {
@@ -902,28 +887,20 @@ func TestGateBlocksWithoutEvidence(t *testing.T) {
 	createTestProject(t, store, "Gate Block Test")
 	featureID := createTestFeature(t, store, "gate-block-test", "Gated Feature")
 
-	// backlog -> todo (free).
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-block-test", "feature_id": featureID,
-	})
-	// todo -> in-progress (free).
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-block-test", "feature_id": featureID,
-	})
+	// Move to in-progress via set_current_feature.
+	startFeature(t, store, "gate-block-test", featureID)
 
-	// in-progress -> ready-for-testing (GATED — should fail without evidence).
+	// advance_feature now requires evidence as a required parameter.
+	// Calling without evidence should fail with validation_error.
 	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
 		"project_id": "gate-block-test",
 		"feature_id": featureID,
 	})
 	if resp.Success {
-		t.Fatal("expected gate to block advance from in-progress without evidence")
+		t.Fatal("expected advance_feature to fail without evidence")
 	}
-	if resp.ErrorCode != "gate_blocked" {
-		t.Errorf("expected gate_blocked error code, got %q", resp.ErrorCode)
-	}
-	if !strings.Contains(resp.ErrorMessage, "Implementation Complete") {
-		t.Errorf("expected gate checklist in error message, got:\n%s", resp.ErrorMessage)
+	if resp.ErrorCode != "validation_error" {
+		t.Errorf("expected validation_error, got %q", resp.ErrorCode)
 	}
 }
 
@@ -932,29 +909,23 @@ func TestGateBlocksWithMissingSections(t *testing.T) {
 	createTestProject(t, store, "Gate Missing Test")
 	featureID := createTestFeature(t, store, "gate-missing-test", "Missing Sections Feature")
 
-	// Advance to in-progress.
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-missing-test", "feature_id": featureID,
-	})
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-missing-test", "feature_id": featureID,
-	})
+	// Move to in-progress via set_current_feature.
+	startFeature(t, store, "gate-missing-test", featureID)
 
-	// Provide evidence with only Summary (missing Changes and Verification).
-	// Must be >100 chars total to pass MinTotalLen check and reach the section check.
+	// Provide evidence with wrong section (## Summary instead of ## Changes).
 	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
 		"project_id": "gate-missing-test",
 		"feature_id": featureID,
 		"evidence":   "## Summary\nImplemented the entire login flow with full OAuth2 support including token refresh, PKCE verification, and error handling for all edge cases.",
 	})
 	if resp.Success {
-		t.Fatal("expected gate to block with missing sections")
+		t.Fatal("expected gate to block with missing ## Changes section")
 	}
 	if resp.ErrorCode != "gate_blocked" {
 		t.Errorf("expected gate_blocked, got %q", resp.ErrorCode)
 	}
-	if !strings.Contains(resp.ErrorMessage, "missing required sections") {
-		t.Errorf("expected 'missing required sections' in error, got:\n%s", resp.ErrorMessage)
+	if !strings.Contains(resp.ErrorMessage, "Changes") {
+		t.Errorf("expected error to mention 'Changes' section, got:\n%s", resp.ErrorMessage)
 	}
 }
 
@@ -963,19 +934,14 @@ func TestGateBlocksWithEmptySections(t *testing.T) {
 	createTestProject(t, store, "Gate Empty Test")
 	featureID := createTestFeature(t, store, "gate-empty-test", "Empty Sections Feature")
 
-	// Advance to in-progress.
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-empty-test", "feature_id": featureID,
-	})
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-empty-test", "feature_id": featureID,
-	})
+	// Move to in-progress via set_current_feature.
+	startFeature(t, store, "gate-empty-test", featureID)
 
-	// All sections present but Changes is empty.
+	// ## Changes section is present but empty (no file paths).
 	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
 		"project_id": "gate-empty-test",
 		"feature_id": featureID,
-		"evidence":   "## Summary\nImplemented the full feature.\n\n## Changes\n\n\n## Verification\nRun the test suite to verify.",
+		"evidence":   "## Changes\n\n\n",
 	})
 	if resp.Success {
 		t.Fatal("expected gate to block with empty section content")
@@ -993,26 +959,21 @@ func TestGatePassesWithValidEvidence(t *testing.T) {
 	createTestProject(t, store, "Gate Pass Test")
 	featureID := createTestFeature(t, store, "gate-pass-test", "Valid Evidence Feature")
 
-	// Advance to in-progress.
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-pass-test", "feature_id": featureID,
-	})
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-pass-test", "feature_id": featureID,
-	})
+	// Move to in-progress via set_current_feature.
+	startFeature(t, store, "gate-pass-test", featureID)
 
-	// Gate 1: valid evidence with all sections.
+	// Code Complete gate: valid evidence with ## Changes and file paths.
 	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
 		"project_id": "gate-pass-test",
 		"feature_id": featureID,
-		"evidence":   gate1Evidence,
+		"evidence":   codeCompleteEvidence,
 	})
 	if !resp.Success {
 		t.Fatalf("expected gate to pass with valid evidence, got: %s", resp.ErrorMessage)
 	}
 	text := resultText(t, resp)
-	if !strings.Contains(text, "ready-for-testing") {
-		t.Errorf("expected ready-for-testing in result, got:\n%s", text)
+	if !strings.Contains(text, "in-testing") {
+		t.Errorf("expected in-testing in result, got:\n%s", text)
 	}
 }
 
@@ -1021,56 +982,94 @@ func TestGate2PassesWithValidEvidence(t *testing.T) {
 	createTestProject(t, store, "Gate2 Pass Test")
 	featureID := createTestFeature(t, store, "gate2-pass-test", "Gate2 Feature")
 
-	// Advance to in-testing.
-	advanceSteps := []string{"backlog", "todo", "in-progress", "ready-for-testing"}
-	for _, from := range advanceSteps {
-		advanceWithGateEvidence(t, store, "gate2-pass-test", featureID, from)
-	}
+	// Move through: todo -> in-progress -> in-testing.
+	startFeature(t, store, "gate2-pass-test", featureID)
+	advanceWithGateEvidence(t, store, "gate2-pass-test", featureID, "in-progress")
 
-	// Gate 2: valid evidence.
+	// Test Complete gate: valid evidence with ## Results and test file paths.
 	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
 		"project_id": "gate2-pass-test",
 		"feature_id": featureID,
-		"evidence":   gate2Evidence,
+		"evidence":   testCompleteEvidence,
 	})
 	if !resp.Success {
 		t.Fatalf("expected gate 2 to pass, got: %s", resp.ErrorMessage)
 	}
 	text := resultText(t, resp)
-	if !strings.Contains(text, "ready-for-docs") {
-		t.Errorf("expected ready-for-docs in result, got:\n%s", text)
+	if !strings.Contains(text, "in-docs") {
+		t.Errorf("expected in-docs in result, got:\n%s", text)
 	}
 }
 
-func TestFreeTransitionsStillWork(t *testing.T) {
+func TestSetCurrentFeatureFromTodo(t *testing.T) {
 	store, _ := testEnv()
-	createTestProject(t, store, "Free Test")
-	featureID := createTestFeature(t, store, "free-test", "Free Feature")
+	createTestProject(t, store, "Start Test")
+	featureID := createTestFeature(t, store, "start-test", "Startable Feature")
 
-	// backlog -> todo (free).
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "free-test",
+	// set_current_feature moves todo -> in-progress.
+	resp := callTool(t, tools.SetCurrentFeature(store), map[string]any{
+		"project_id": "start-test",
 		"feature_id": featureID,
 	})
 	if !resp.Success {
-		t.Fatalf("expected free transition backlog->todo to succeed, got: %s", resp.ErrorMessage)
+		t.Fatalf("expected set_current_feature from todo to succeed, got: %s", resp.ErrorMessage)
 	}
 	text := resultText(t, resp)
-	if !strings.Contains(text, "todo") {
-		t.Errorf("expected 'todo' in result, got:\n%s", text)
+	if !strings.Contains(text, "in-progress") {
+		t.Errorf("expected 'in-progress' in result, got:\n%s", text)
 	}
+}
 
-	// todo -> in-progress (free).
-	resp = callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "free-test",
+func TestSetCurrentFeatureFromNeedsEdits(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "Restart Test")
+	featureID := createTestFeature(t, store, "restart-test", "Restartable Feature")
+
+	// Move through full flow to in-review, then reject.
+	startFeature(t, store, "restart-test", featureID)
+	advanceWithGateEvidence(t, store, "restart-test", featureID, "in-progress")
+	advanceWithGateEvidence(t, store, "restart-test", featureID, "in-testing")
+	advanceWithGateEvidence(t, store, "restart-test", featureID, "in-docs")
+
+	// Reject to needs-edits.
+	callTool(t, tools.RejectFeature(store), map[string]any{
+		"project_id": "restart-test",
+		"feature_id": featureID,
+		"reason":     "Needs fixes",
+	})
+
+	// set_current_feature from needs-edits -> in-progress.
+	resp := callTool(t, tools.SetCurrentFeature(store), map[string]any{
+		"project_id": "restart-test",
 		"feature_id": featureID,
 	})
 	if !resp.Success {
-		t.Fatalf("expected free transition todo->in-progress to succeed, got: %s", resp.ErrorMessage)
+		t.Fatalf("expected set_current_feature from needs-edits to succeed, got: %s", resp.ErrorMessage)
 	}
-	text = resultText(t, resp)
+	text := resultText(t, resp)
 	if !strings.Contains(text, "in-progress") {
 		t.Errorf("expected 'in-progress' in result, got:\n%s", text)
+	}
+}
+
+func TestSetCurrentFeatureBlockedFromInProgress(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "Block Start Test")
+	featureID := createTestFeature(t, store, "block-start-test", "Already Started Feature")
+
+	// Move to in-progress.
+	startFeature(t, store, "block-start-test", featureID)
+
+	// Trying set_current_feature again from in-progress should fail.
+	resp := callTool(t, tools.SetCurrentFeature(store), map[string]any{
+		"project_id": "block-start-test",
+		"feature_id": featureID,
+	})
+	if resp.Success {
+		t.Fatal("expected set_current_feature from in-progress to fail")
+	}
+	if resp.ErrorCode != "workflow_error" {
+		t.Errorf("expected workflow_error, got %q", resp.ErrorCode)
 	}
 }
 
@@ -1079,25 +1078,17 @@ func TestAdvanceFromInReviewBlocked(t *testing.T) {
 	createTestProject(t, store, "Review Block Test")
 	featureID := createTestFeature(t, store, "review-block-test", "Review Block Feature")
 
-	// Advance to documented, then request_review to get to in-review.
-	advanceSteps := []string{
-		"backlog", "todo", "in-progress", "ready-for-testing",
-		"in-testing", "ready-for-docs", "in-docs",
-	}
-	for _, from := range advanceSteps {
-		advanceWithGateEvidence(t, store, "review-block-test", featureID, from)
-	}
-	callTool(t, tools.RequestReview(store), map[string]any{
-		"project_id": "review-block-test",
-		"feature_id": featureID,
-		"evidence":   reviewEvidence,
-	})
+	// Move through full workflow to in-review.
+	startFeature(t, store, "review-block-test", featureID)
+	advanceWithGateEvidence(t, store, "review-block-test", featureID, "in-progress")
+	advanceWithGateEvidence(t, store, "review-block-test", featureID, "in-testing")
+	advanceWithGateEvidence(t, store, "review-block-test", featureID, "in-docs")
 
 	// advance_feature from in-review should be blocked.
 	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
 		"project_id": "review-block-test",
 		"feature_id": featureID,
-		"evidence":   "I approve everything myself",
+		"evidence":   "## Changes\n- some/file.go (trying to self-approve)",
 	})
 	if resp.Success {
 		t.Fatal("expected advance_feature from in-review to be blocked")
@@ -1110,86 +1101,12 @@ func TestAdvanceFromInReviewBlocked(t *testing.T) {
 	}
 }
 
-func TestRequestReviewRequiresEvidence(t *testing.T) {
-	store, _ := testEnv()
-	createTestProject(t, store, "Review Ev Test")
-	featureID := createTestFeature(t, store, "review-ev-test", "Review Evidence Feature")
-
-	// Advance to documented.
-	advanceSteps := []string{
-		"backlog", "todo", "in-progress", "ready-for-testing",
-		"in-testing", "ready-for-docs", "in-docs",
-	}
-	for _, from := range advanceSteps {
-		advanceWithGateEvidence(t, store, "review-ev-test", featureID, from)
-	}
-
-	// request_review without evidence should fail (required field).
-	resp := callTool(t, tools.RequestReview(store), map[string]any{
-		"project_id": "review-ev-test",
-		"feature_id": featureID,
-	})
-	if resp.Success {
-		t.Fatal("expected request_review without evidence to fail")
-	}
-
-	// request_review with bad evidence (missing sections).
-	resp = callTool(t, tools.RequestReview(store), map[string]any{
-		"project_id": "review-ev-test",
-		"feature_id": featureID,
-		"evidence":   "Looks good to me, ship it now please!",
-	})
-	if resp.Success {
-		t.Fatal("expected request_review with bad evidence to fail")
-	}
-	if resp.ErrorCode != "gate_blocked" {
-		t.Errorf("expected gate_blocked, got %q", resp.ErrorCode)
-	}
-}
-
-func TestRequestReviewInstructsAgent(t *testing.T) {
-	store, _ := testEnv()
-	createTestProject(t, store, "Review Instruct Test")
-	featureID := createTestFeature(t, store, "review-instruct-test", "Instruction Feature")
-
-	// Advance to documented.
-	advanceSteps := []string{
-		"backlog", "todo", "in-progress", "ready-for-testing",
-		"in-testing", "ready-for-docs", "in-docs",
-	}
-	for _, from := range advanceSteps {
-		advanceWithGateEvidence(t, store, "review-instruct-test", featureID, from)
-	}
-
-	// request_review with valid self-review evidence.
-	resp := callTool(t, tools.RequestReview(store), map[string]any{
-		"project_id": "review-instruct-test",
-		"feature_id": featureID,
-		"evidence":   reviewEvidence,
-	})
-	if !resp.Success {
-		t.Fatalf("request_review failed: %s", resp.ErrorMessage)
-	}
-	text := resultText(t, resp)
-
-	// Response must contain instruction to use AskUserQuestion.
-	if !strings.Contains(text, "AskUserQuestion") {
-		t.Errorf("expected response to contain 'AskUserQuestion' instruction, got:\n%s", text)
-	}
-	if !strings.Contains(text, "submit_review") {
-		t.Errorf("expected response to mention 'submit_review', got:\n%s", text)
-	}
-	if !strings.Contains(text, "Do NOT call submit_review without user approval") {
-		t.Errorf("expected warning about user approval, got:\n%s", text)
-	}
-}
-
 func TestGetGateRequirements(t *testing.T) {
 	store, _ := testEnv()
 	createTestProject(t, store, "Gate Req Test")
 	featureID := createTestFeature(t, store, "gate-req-test", "Gate Req Feature")
 
-	// From backlog — should say "free".
+	// From todo -- should mention set_current_feature (no gate, but not "free" via advance).
 	resp := callTool(t, tools.GetGateRequirements(store), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
@@ -1198,19 +1115,15 @@ func TestGetGateRequirements(t *testing.T) {
 		t.Fatalf("get_gate_requirements failed: %s", resp.ErrorMessage)
 	}
 	text := resultText(t, resp)
-	if !strings.Contains(text, "free") {
-		t.Errorf("expected 'free' for backlog->todo, got:\n%s", text)
+	// todo -> in-progress is not gated, so it should say "free" or mention advance_feature.
+	if !strings.Contains(text, "free") && !strings.Contains(text, "advance_feature") {
+		t.Errorf("expected 'free' or 'advance_feature' for todo->in-progress, got:\n%s", text)
 	}
 
-	// Advance to in-progress.
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-req-test", "feature_id": featureID,
-	})
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-req-test", "feature_id": featureID,
-	})
+	// Move to in-progress via set_current_feature.
+	startFeature(t, store, "gate-req-test", featureID)
 
-	// From in-progress — should show gate checklist.
+	// From in-progress -- should show Code Complete gate with ## Changes.
 	resp = callTool(t, tools.GetGateRequirements(store), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
@@ -1219,22 +1132,14 @@ func TestGetGateRequirements(t *testing.T) {
 		t.Fatalf("get_gate_requirements failed: %s", resp.ErrorMessage)
 	}
 	text = resultText(t, resp)
-	if !strings.Contains(text, "Implementation Complete") {
-		t.Errorf("expected gate checklist for in-progress, got:\n%s", text)
+	if !strings.Contains(text, "Changes") {
+		t.Errorf("expected 'Changes' section requirement for in-progress gate, got:\n%s", text)
 	}
 
-	// Advance to documented.
+	// Advance to in-testing.
 	advanceWithGateEvidence(t, store, "gate-req-test", featureID, "in-progress")
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-req-test", "feature_id": featureID,
-	})
-	advanceWithGateEvidence(t, store, "gate-req-test", featureID, "in-testing")
-	callTool(t, tools.AdvanceFeature(store), map[string]any{
-		"project_id": "gate-req-test", "feature_id": featureID,
-	})
-	advanceWithGateEvidence(t, store, "gate-req-test", featureID, "in-docs")
 
-	// From documented — should mention request_review.
+	// From in-testing -- should show Test Complete gate with ## Results.
 	resp = callTool(t, tools.GetGateRequirements(store), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
@@ -1243,18 +1148,30 @@ func TestGetGateRequirements(t *testing.T) {
 		t.Fatalf("get_gate_requirements failed: %s", resp.ErrorMessage)
 	}
 	text = resultText(t, resp)
-	if !strings.Contains(text, "request_review") {
-		t.Errorf("expected 'request_review' for documented status, got:\n%s", text)
+	if !strings.Contains(text, "Results") {
+		t.Errorf("expected 'Results' section requirement for in-testing gate, got:\n%s", text)
+	}
+
+	// Advance to in-docs.
+	advanceWithGateEvidence(t, store, "gate-req-test", featureID, "in-testing")
+
+	// From in-docs -- should show Docs Complete gate with ## Docs.
+	resp = callTool(t, tools.GetGateRequirements(store), map[string]any{
+		"project_id": "gate-req-test",
+		"feature_id": featureID,
+	})
+	if !resp.Success {
+		t.Fatalf("get_gate_requirements failed: %s", resp.ErrorMessage)
+	}
+	text = resultText(t, resp)
+	if !strings.Contains(text, "Docs") {
+		t.Errorf("expected 'Docs' section requirement for in-docs gate, got:\n%s", text)
 	}
 
 	// Advance to in-review.
-	callTool(t, tools.RequestReview(store), map[string]any{
-		"project_id": "gate-req-test",
-		"feature_id": featureID,
-		"evidence":   reviewEvidence,
-	})
+	advanceWithGateEvidence(t, store, "gate-req-test", featureID, "in-docs")
 
-	// From in-review — should mention submit_review.
+	// From in-review -- should mention submit_review.
 	resp = callTool(t, tools.GetGateRequirements(store), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
@@ -1268,5 +1185,248 @@ func TestGetGateRequirements(t *testing.T) {
 	}
 	if !strings.Contains(text, "AskUserQuestion") {
 		t.Errorf("expected 'AskUserQuestion' instruction for in-review, got:\n%s", text)
+	}
+}
+
+// TestBugSkipsDocs verifies that bugs skip the docs gate and go from
+// in-testing directly to in-review.
+func TestBugSkipsDocs(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "Bug Skip Test")
+	featureID := createTestFeatureWithKind(t, store, "bug-skip-test", "Login Crash", "bug")
+
+	// Move through: todo -> in-progress -> in-testing.
+	startFeature(t, store, "bug-skip-test", featureID)
+	advanceWithGateEvidence(t, store, "bug-skip-test", featureID, "in-progress")
+
+	// From in-testing, bugs should go to in-review (skipping in-docs).
+	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+		"project_id": "bug-skip-test",
+		"feature_id": featureID,
+		"evidence":   testCompleteEvidence,
+	})
+	if !resp.Success {
+		t.Fatalf("expected bug to advance from in-testing, got: %s", resp.ErrorMessage)
+	}
+	text := resultText(t, resp)
+	if !strings.Contains(text, "in-review") {
+		t.Errorf("expected bug to skip docs and go to in-review, got:\n%s", text)
+	}
+}
+
+// TestHotfixSkipsDocs verifies that hotfixes skip the docs gate.
+func TestHotfixSkipsDocs(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "Hotfix Skip Test")
+	featureID := createTestFeatureWithKind(t, store, "hotfix-skip-test", "Urgent Fix", "hotfix")
+
+	// Move through: todo -> in-progress -> in-testing.
+	startFeature(t, store, "hotfix-skip-test", featureID)
+	advanceWithGateEvidence(t, store, "hotfix-skip-test", featureID, "in-progress")
+
+	// From in-testing, hotfixes should go to in-review (skipping in-docs).
+	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+		"project_id": "hotfix-skip-test",
+		"feature_id": featureID,
+		"evidence":   testCompleteEvidence,
+	})
+	if !resp.Success {
+		t.Fatalf("expected hotfix to advance from in-testing, got: %s", resp.ErrorMessage)
+	}
+	text := resultText(t, resp)
+	if !strings.Contains(text, "in-review") {
+		t.Errorf("expected hotfix to skip docs and go to in-review, got:\n%s", text)
+	}
+}
+
+// TestTestcaseSkipsDocs verifies that testcases skip the docs gate.
+func TestTestcaseSkipsDocs(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "Testcase Skip Test")
+	featureID := createTestFeatureWithKind(t, store, "testcase-skip-test", "Auth Tests", "testcase")
+
+	// Move through: todo -> in-progress -> in-testing.
+	startFeature(t, store, "testcase-skip-test", featureID)
+	advanceWithGateEvidence(t, store, "testcase-skip-test", featureID, "in-progress")
+
+	// From in-testing, testcases should go to in-review (skipping in-docs).
+	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+		"project_id": "testcase-skip-test",
+		"feature_id": featureID,
+		"evidence":   testCompleteEvidence,
+	})
+	if !resp.Success {
+		t.Fatalf("expected testcase to advance from in-testing, got: %s", resp.ErrorMessage)
+	}
+	text := resultText(t, resp)
+	if !strings.Contains(text, "in-review") {
+		t.Errorf("expected testcase to skip docs and go to in-review, got:\n%s", text)
+	}
+}
+
+// TestFeatureDoesNotSkipDocs verifies that regular features go through docs.
+func TestFeatureDoesNotSkipDocs(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "No Skip Test")
+	featureID := createTestFeature(t, store, "no-skip-test", "Regular Feature")
+
+	// Move through: todo -> in-progress -> in-testing.
+	startFeature(t, store, "no-skip-test", featureID)
+	advanceWithGateEvidence(t, store, "no-skip-test", featureID, "in-progress")
+
+	// From in-testing, regular features should go to in-docs (not skip).
+	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+		"project_id": "no-skip-test",
+		"feature_id": featureID,
+		"evidence":   testCompleteEvidence,
+	})
+	if !resp.Success {
+		t.Fatalf("expected feature to advance from in-testing, got: %s", resp.ErrorMessage)
+	}
+	text := resultText(t, resp)
+	if !strings.Contains(text, "in-docs") {
+		t.Errorf("expected regular feature to go to in-docs, got:\n%s", text)
+	}
+}
+
+// TestGateBlocksWithNoFilePaths verifies that evidence with the right section
+// but no file paths is rejected.
+func TestGateBlocksWithNoFilePaths(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "No Paths Test")
+	featureID := createTestFeature(t, store, "no-paths-test", "No Paths Feature")
+
+	startFeature(t, store, "no-paths-test", featureID)
+
+	// ## Changes present but no file paths in it.
+	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+		"project_id": "no-paths-test",
+		"feature_id": featureID,
+		"evidence":   "## Changes\nMade various improvements to the codebase and refactored the module.",
+	})
+	if resp.Success {
+		t.Fatal("expected gate to block when no file paths in ## Changes")
+	}
+	if resp.ErrorCode != "gate_blocked" {
+		t.Errorf("expected gate_blocked, got %q", resp.ErrorCode)
+	}
+	if !strings.Contains(resp.ErrorMessage, "file path") {
+		t.Errorf("expected error to mention file paths, got:\n%s", resp.ErrorMessage)
+	}
+}
+
+// TestDocsGateRequiresDocsFolder verifies that the docs gate requires files
+// in the docs/ folder.
+func TestDocsGateRequiresDocsFolder(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "Docs Folder Test")
+	featureID := createTestFeature(t, store, "docs-folder-test", "Docs Folder Feature")
+
+	// Move through to in-docs.
+	startFeature(t, store, "docs-folder-test", featureID)
+	advanceWithGateEvidence(t, store, "docs-folder-test", featureID, "in-progress")
+	advanceWithGateEvidence(t, store, "docs-folder-test", featureID, "in-testing")
+
+	// Try advancing with ## Docs referencing files NOT in docs/ folder.
+	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+		"project_id": "docs-folder-test",
+		"feature_id": featureID,
+		"evidence":   "## Docs\n- src/readme.md (updated readme in source dir)",
+	})
+	if resp.Success {
+		t.Fatal("expected docs gate to reject files not in docs/ folder")
+	}
+	// Should get needs_approval (file type mismatch) since files exist but wrong folder.
+	if resp.ErrorCode != "needs_approval" {
+		t.Errorf("expected needs_approval for wrong folder, got %q: %s", resp.ErrorCode, resp.ErrorMessage)
+	}
+}
+
+// TestAdvanceRequiresEvidenceParameter verifies that advance_feature always
+// requires the evidence parameter (it is a required field in the new workflow).
+func TestAdvanceRequiresEvidenceParameter(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "Ev Required Test")
+	featureID := createTestFeature(t, store, "ev-required-test", "Evidence Required Feature")
+
+	startFeature(t, store, "ev-required-test", featureID)
+
+	// Calling advance_feature without evidence should return validation_error.
+	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+		"project_id": "ev-required-test",
+		"feature_id": featureID,
+	})
+	if resp.Success {
+		t.Fatal("expected advance_feature without evidence to fail")
+	}
+	if resp.ErrorCode != "validation_error" {
+		t.Errorf("expected validation_error, got %q", resp.ErrorCode)
+	}
+}
+
+// TestSubmitReviewRequiresInReview verifies that submit_review only works from
+// the in-review status.
+func TestSubmitReviewRequiresInReview(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "Review Status Test")
+	featureID := createTestFeature(t, store, "review-status-test", "Review Status Feature")
+
+	// Feature is in todo status -- submit_review should fail.
+	resp := callTool(t, tools.SubmitReview(store), map[string]any{
+		"project_id": "review-status-test",
+		"feature_id": featureID,
+		"status":     "approved",
+	})
+	if resp.Success {
+		t.Fatal("expected submit_review from todo to fail")
+	}
+	if resp.ErrorCode != "workflow_error" {
+		t.Errorf("expected workflow_error, got %q", resp.ErrorCode)
+	}
+}
+
+// TestFullWorkflowEndToEnd runs the complete workflow from creation to done.
+func TestFullWorkflowEndToEnd(t *testing.T) {
+	store, _ := testEnv()
+	createTestProject(t, store, "E2E Test")
+	featureID := createTestFeature(t, store, "e2e-test", "End to End Feature")
+
+	// 1. Start: todo -> in-progress.
+	startFeature(t, store, "e2e-test", featureID)
+
+	// 2. Code complete: in-progress -> in-testing.
+	advanceWithGateEvidence(t, store, "e2e-test", featureID, "in-progress")
+
+	// 3. Tests complete: in-testing -> in-docs.
+	advanceWithGateEvidence(t, store, "e2e-test", featureID, "in-testing")
+
+	// 4. Docs complete: in-docs -> in-review.
+	advanceWithGateEvidence(t, store, "e2e-test", featureID, "in-docs")
+
+	// 5. Approve: in-review -> done.
+	resp := callTool(t, tools.SubmitReview(store), map[string]any{
+		"project_id": "e2e-test",
+		"feature_id": featureID,
+		"status":     "approved",
+		"comment":    "All good, shipping it.",
+	})
+	if !resp.Success {
+		t.Fatalf("submit_review failed: %s", resp.ErrorMessage)
+	}
+	text := resultText(t, resp)
+	if !strings.Contains(text, "done") {
+		t.Errorf("expected 'done' in final result, got:\n%s", text)
+	}
+
+	// Verify progress shows 100%.
+	resp = callTool(t, tools.GetProgress(store), map[string]any{
+		"project_id": "e2e-test",
+	})
+	if !resp.Success {
+		t.Fatalf("get_progress failed: %s", resp.ErrorMessage)
+	}
+	text = resultText(t, resp)
+	if !strings.Contains(text, "100.0%") {
+		t.Errorf("expected '100.0%%' completion after done, got:\n%s", text)
 	}
 }

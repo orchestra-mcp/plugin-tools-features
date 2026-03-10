@@ -72,16 +72,18 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 		"Get the gate requirements for the next transition of a feature. Shows what evidence is needed before advance_feature will succeed.",
 		tools.GetGateRequirementsSchema(), tools.GetGateRequirements(s))
 
-	// --- Review tools (3) ---
-	builder.RegisterTool("request_review",
-		"Request a review for a documented feature",
-		tools.RequestReviewSchema(), tools.RequestReview(s))
+	// --- Review tools (2) ---
 	builder.RegisterTool("submit_review",
 		"Submit a review decision (approved or needs-edits)",
 		tools.SubmitReviewSchema(), tools.SubmitReview(s))
 	builder.RegisterTool("get_pending_reviews",
 		"Get all features pending review",
 		tools.GetPendingReviewsSchema(), tools.GetPendingReviews(s))
+
+	// --- Lock tools (1) ---
+	builder.RegisterTool("unlock_feature",
+		"Force-release a session lock on a feature (admin recovery)",
+		tools.UnlockFeatureSchema(), tools.UnlockFeature(s))
 
 	// --- Dependency tools (3) ---
 	builder.RegisterTool("add_dependency",
@@ -161,6 +163,9 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	builder.RegisterTool("complete_plan",
 		"Mark a plan as completed after all features are done",
 		tools.CompletePlanSchema(), tools.CompletePlan(s))
+	builder.RegisterTool("delete_plan",
+		"Delete a plan from a project",
+		tools.DeletePlanSchema(), tools.DeletePlan(s))
 
 	// --- Request tools (6) ---
 	builder.RegisterTool("create_request",
