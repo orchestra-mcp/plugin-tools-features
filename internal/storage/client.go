@@ -354,6 +354,9 @@ func projectToMetadata(p *types.ProjectData) (*structpb.Struct, error) {
 		"created_at":  p.CreatedAt,
 		"updated_at":  p.UpdatedAt,
 	}
+	if p.Mode != "" {
+		m["mode"] = string(p.Mode)
+	}
 	return structpb.NewStruct(m)
 }
 
@@ -728,6 +731,436 @@ func metadataToAssignmentRule(meta *structpb.Struct) (*types.AssignmentRuleData,
 		return nil, err
 	}
 	var r types.AssignmentRuleData
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ---------- Hypothesis operations ----------
+
+// ReadHypothesis loads a hypothesis by project slug and hypothesis ID.
+func (fs *FeatureStorage) ReadHypothesis(ctx context.Context, projectSlug, hypoID string) (*types.HypothesisData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.HypothesesDir, hypoID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read hypothesis %s/%s: %w", projectSlug, hypoID, err)
+	}
+	hypo, err := metadataToHypothesis(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse hypothesis %s/%s: %w", projectSlug, hypoID, err)
+	}
+	return hypo, string(resp.Content), resp.Version, nil
+}
+
+// WriteHypothesis persists a hypothesis to storage.
+func (fs *FeatureStorage) WriteHypothesis(ctx context.Context, projectSlug, hypoID string, data *types.HypothesisData, body string, expectedVersion int64) (int64, error) {
+	meta, err := hypothesisToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode hypothesis: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.HypothesesDir, hypoID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListHypotheses returns all hypotheses for a project.
+func (fs *FeatureStorage) ListHypotheses(ctx context.Context, projectSlug string) ([]*types.HypothesisData, error) {
+	prefix := filepath.Join(projectSlug, helpers.HypothesesDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list hypotheses: %w", err)
+	}
+	var hypotheses []*types.HypothesisData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		hypoID := strings.TrimSuffix(base, ".md")
+		hypo, _, _, err := fs.ReadHypothesis(ctx, projectSlug, hypoID)
+		if err != nil {
+			continue
+		}
+		hypotheses = append(hypotheses, hypo)
+	}
+	return hypotheses, nil
+}
+
+// DeleteHypothesis removes a hypothesis from storage.
+func (fs *FeatureStorage) DeleteHypothesis(ctx context.Context, projectSlug, hypoID string) error {
+	path := filepath.Join(projectSlug, helpers.HypothesesDir, hypoID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
+func hypothesisToMetadata(h *types.HypothesisData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":          h.ID,
+		"project_id":  h.ProjectID,
+		"title":       h.Title,
+		"problem":     h.Problem,
+		"target_user": h.TargetUser,
+		"assumption":  h.Assumption,
+		"status":      string(h.Status),
+		"version":     float64(h.Version),
+		"created_at":  h.CreatedAt,
+		"updated_at":  h.UpdatedAt,
+	}
+	if h.CycleID != "" {
+		m["cycle_id"] = h.CycleID
+	}
+	if h.RefinedFrom != "" {
+		m["refined_from"] = h.RefinedFrom
+	}
+	if len(h.Experiments) > 0 {
+		exps := make([]any, len(h.Experiments))
+		for i, e := range h.Experiments {
+			exps[i] = e
+		}
+		m["experiments"] = exps
+	}
+	if len(h.Labels) > 0 {
+		labels := make([]any, len(h.Labels))
+		for i, l := range h.Labels {
+			labels[i] = l
+		}
+		m["labels"] = labels
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToHypothesis(meta *structpb.Struct) (*types.HypothesisData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var h types.HypothesisData
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+// ---------- Experiment operations ----------
+
+// ReadExperiment loads an experiment by project slug and experiment ID.
+func (fs *FeatureStorage) ReadExperiment(ctx context.Context, projectSlug, exprID string) (*types.ExperimentData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.ExperimentsDir, exprID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read experiment %s/%s: %w", projectSlug, exprID, err)
+	}
+	expr, err := metadataToExperiment(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse experiment %s/%s: %w", projectSlug, exprID, err)
+	}
+	return expr, string(resp.Content), resp.Version, nil
+}
+
+// WriteExperiment persists an experiment to storage.
+func (fs *FeatureStorage) WriteExperiment(ctx context.Context, projectSlug, exprID string, data *types.ExperimentData, body string, expectedVersion int64) (int64, error) {
+	meta, err := experimentToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode experiment: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.ExperimentsDir, exprID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListExperiments returns all experiments for a project.
+func (fs *FeatureStorage) ListExperiments(ctx context.Context, projectSlug string) ([]*types.ExperimentData, error) {
+	prefix := filepath.Join(projectSlug, helpers.ExperimentsDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list experiments: %w", err)
+	}
+	var experiments []*types.ExperimentData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		exprID := strings.TrimSuffix(base, ".md")
+		expr, _, _, err := fs.ReadExperiment(ctx, projectSlug, exprID)
+		if err != nil {
+			continue
+		}
+		experiments = append(experiments, expr)
+	}
+	return experiments, nil
+}
+
+// DeleteExperiment removes an experiment from storage.
+func (fs *FeatureStorage) DeleteExperiment(ctx context.Context, projectSlug, exprID string) error {
+	path := filepath.Join(projectSlug, helpers.ExperimentsDir, exprID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
+func experimentToMetadata(e *types.ExperimentData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":             e.ID,
+		"project_id":     e.ProjectID,
+		"hypothesis_id":  e.HypothesisID,
+		"title":          e.Title,
+		"kind":           string(e.Kind),
+		"question":       e.Question,
+		"method":         e.Method,
+		"success_signal": e.SuccessSignal,
+		"kill_condition": e.KillCondition,
+		"status":         string(e.Status),
+		"version":        float64(e.Version),
+		"created_at":     e.CreatedAt,
+		"updated_at":     e.UpdatedAt,
+	}
+	if e.CycleID != "" {
+		m["cycle_id"] = e.CycleID
+	}
+	if e.Outcome != "" {
+		m["outcome"] = e.Outcome
+	}
+	if e.KillTriggered {
+		m["kill_triggered"] = true
+	}
+	if len(e.Signals) > 0 {
+		sigs := make([]any, len(e.Signals))
+		for i, s := range e.Signals {
+			sigs[i] = map[string]any{
+				"type":        string(s.Type),
+				"metric":      s.Metric,
+				"expected":    s.Expected,
+				"actual":      s.Actual,
+				"confidence":  s.Confidence,
+				"recorded_at": s.RecordedAt,
+			}
+		}
+		m["signals"] = sigs
+	}
+	if len(e.SpawnedFeatures) > 0 {
+		feats := make([]any, len(e.SpawnedFeatures))
+		for i, f := range e.SpawnedFeatures {
+			feats[i] = f
+		}
+		m["spawned_features"] = feats
+	}
+	if len(e.Labels) > 0 {
+		labels := make([]any, len(e.Labels))
+		for i, l := range e.Labels {
+			labels[i] = l
+		}
+		m["labels"] = labels
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToExperiment(meta *structpb.Struct) (*types.ExperimentData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var e types.ExperimentData
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+// ---------- Discovery Cycle operations ----------
+
+// ReadDiscoveryCycle loads a discovery cycle by project slug and cycle ID.
+func (fs *FeatureStorage) ReadDiscoveryCycle(ctx context.Context, projectSlug, cycleID string) (*types.DiscoveryCycleData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.DiscoveryCyclesDir, cycleID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read discovery cycle %s/%s: %w", projectSlug, cycleID, err)
+	}
+	cycle, err := metadataToDiscoveryCycle(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse discovery cycle %s/%s: %w", projectSlug, cycleID, err)
+	}
+	return cycle, string(resp.Content), resp.Version, nil
+}
+
+// WriteDiscoveryCycle persists a discovery cycle to storage.
+func (fs *FeatureStorage) WriteDiscoveryCycle(ctx context.Context, projectSlug, cycleID string, data *types.DiscoveryCycleData, body string, expectedVersion int64) (int64, error) {
+	meta, err := discoveryCycleToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode discovery cycle: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.DiscoveryCyclesDir, cycleID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListDiscoveryCycles returns all discovery cycles for a project.
+func (fs *FeatureStorage) ListDiscoveryCycles(ctx context.Context, projectSlug string) ([]*types.DiscoveryCycleData, error) {
+	prefix := filepath.Join(projectSlug, helpers.DiscoveryCyclesDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list discovery cycles: %w", err)
+	}
+	var cycles []*types.DiscoveryCycleData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		cycleID := strings.TrimSuffix(base, ".md")
+		cycle, _, _, err := fs.ReadDiscoveryCycle(ctx, projectSlug, cycleID)
+		if err != nil {
+			continue
+		}
+		cycles = append(cycles, cycle)
+	}
+	return cycles, nil
+}
+
+// DeleteDiscoveryCycle removes a discovery cycle from storage.
+func (fs *FeatureStorage) DeleteDiscoveryCycle(ctx context.Context, projectSlug, cycleID string) error {
+	path := filepath.Join(projectSlug, helpers.DiscoveryCyclesDir, cycleID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
+func discoveryCycleToMetadata(c *types.DiscoveryCycleData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":         c.ID,
+		"project_id": c.ProjectID,
+		"title":      c.Title,
+		"goal":       c.Goal,
+		"start_date": c.StartDate,
+		"end_date":   c.EndDate,
+		"status":     string(c.Status),
+		"version":    float64(c.Version),
+		"created_at": c.CreatedAt,
+		"updated_at": c.UpdatedAt,
+	}
+	if c.Learnings != "" {
+		m["learnings"] = c.Learnings
+	}
+	if c.Decision != "" {
+		m["decision"] = c.Decision
+	}
+	if len(c.Hypotheses) > 0 {
+		hypos := make([]any, len(c.Hypotheses))
+		for i, h := range c.Hypotheses {
+			hypos[i] = h
+		}
+		m["hypotheses"] = hypos
+	}
+	if len(c.Experiments) > 0 {
+		exps := make([]any, len(c.Experiments))
+		for i, e := range c.Experiments {
+			exps[i] = e
+		}
+		m["experiments"] = exps
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToDiscoveryCycle(meta *structpb.Struct) (*types.DiscoveryCycleData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var c types.DiscoveryCycleData
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// ---------- Discovery Review operations ----------
+
+// ReadDiscoveryReview loads a discovery review by project slug and review ID.
+func (fs *FeatureStorage) ReadDiscoveryReview(ctx context.Context, projectSlug, reviewID string) (*types.DiscoveryReviewData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.DiscoveryReviewsDir, reviewID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read discovery review %s/%s: %w", projectSlug, reviewID, err)
+	}
+	review, err := metadataToDiscoveryReview(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse discovery review %s/%s: %w", projectSlug, reviewID, err)
+	}
+	return review, string(resp.Content), resp.Version, nil
+}
+
+// WriteDiscoveryReview persists a discovery review to storage.
+func (fs *FeatureStorage) WriteDiscoveryReview(ctx context.Context, projectSlug, reviewID string, data *types.DiscoveryReviewData, body string, expectedVersion int64) (int64, error) {
+	meta, err := discoveryReviewToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode discovery review: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.DiscoveryReviewsDir, reviewID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListDiscoveryReviews returns all discovery reviews for a project.
+func (fs *FeatureStorage) ListDiscoveryReviews(ctx context.Context, projectSlug string) ([]*types.DiscoveryReviewData, error) {
+	prefix := filepath.Join(projectSlug, helpers.DiscoveryReviewsDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list discovery reviews: %w", err)
+	}
+	var reviews []*types.DiscoveryReviewData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		reviewID := strings.TrimSuffix(base, ".md")
+		review, _, _, err := fs.ReadDiscoveryReview(ctx, projectSlug, reviewID)
+		if err != nil {
+			continue
+		}
+		reviews = append(reviews, review)
+	}
+	return reviews, nil
+}
+
+// DeleteDiscoveryReview removes a discovery review from storage.
+func (fs *FeatureStorage) DeleteDiscoveryReview(ctx context.Context, projectSlug, reviewID string) error {
+	path := filepath.Join(projectSlug, helpers.DiscoveryReviewsDir, reviewID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
+func discoveryReviewToMetadata(r *types.DiscoveryReviewData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":         r.ID,
+		"project_id": r.ProjectID,
+		"cycle_id":   r.CycleID,
+		"title":      r.Title,
+		"version":    float64(r.Version),
+		"created_at": r.CreatedAt,
+		"updated_at": r.UpdatedAt,
+	}
+	if r.Surprises != "" {
+		m["surprises"] = r.Surprises
+	}
+	if r.WrongAbout != "" {
+		m["wrong_about"] = r.WrongAbout
+	}
+	if r.TransitionReady {
+		m["transition_ready"] = true
+	}
+	if len(r.Items) > 0 {
+		items := make([]any, len(r.Items))
+		for i, item := range r.Items {
+			items[i] = map[string]any{
+				"item_id":   item.ItemID,
+				"item_type": item.ItemType,
+				"decision":  string(item.Decision),
+				"rationale": item.Rationale,
+			}
+		}
+		m["items"] = items
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToDiscoveryReview(meta *structpb.Struct) (*types.DiscoveryReviewData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var r types.DiscoveryReviewData
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, err
 	}

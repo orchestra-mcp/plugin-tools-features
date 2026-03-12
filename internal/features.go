@@ -1,5 +1,5 @@
 // Package internal contains the core registration logic for the tools.features
-// plugin. The FeaturesPlugin struct wires all 70 tool handlers to the plugin
+// plugin. The FeaturesPlugin struct wires all 101 tool handlers to the plugin
 // builder with their schemas and descriptions.
 package internal
 
@@ -14,7 +14,7 @@ type FeaturesPlugin struct {
 	Storage *storage.FeatureStorage
 }
 
-// RegisterTools registers all 70 tools on the given plugin builder.
+// RegisterTools registers all 101 tools on the given plugin builder.
 func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	s := fp.Storage
 
@@ -264,4 +264,103 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	builder.RegisterTool("git_create_branch",
 		"Create a new branch and switch to it",
 		tools.GitCreateBranchSchema(), tools.GitCreateBranch(s))
+
+	// --- Discovery Cycle tools (6) ---
+	builder.RegisterTool("create_discovery_cycle",
+		"Create a time-boxed discovery cycle (1-2 weeks) for hypothesis validation",
+		tools.CreateDiscoveryCycleSchema(), tools.CreateDiscoveryCycle(s))
+	builder.RegisterTool("get_discovery_cycle",
+		"Get a discovery cycle's data and linked hypotheses/experiments",
+		tools.GetDiscoveryCycleSchema(), tools.GetDiscoveryCycle(s))
+	builder.RegisterTool("list_discovery_cycles",
+		"List discovery cycles, optionally filtered by status",
+		tools.ListDiscoveryCyclesSchema(), tools.ListDiscoveryCycles(s))
+	builder.RegisterTool("update_discovery_cycle",
+		"Update a discovery cycle's title, goal, or dates",
+		tools.UpdateDiscoveryCycleSchema(), tools.UpdateDiscoveryCycle(s))
+	builder.RegisterTool("complete_discovery_cycle",
+		"Complete a discovery cycle with learnings and decision (continue/pivot/stop)",
+		tools.CompleteDiscoveryCycleSchema(), tools.CompleteDiscoveryCycle(s))
+	builder.RegisterTool("delete_discovery_cycle",
+		"Delete a discovery cycle",
+		tools.DeleteDiscoveryCycleSchema(), tools.DeleteDiscoveryCycle(s))
+
+	// --- Hypothesis tools (7) ---
+	builder.RegisterTool("create_hypothesis",
+		"Create a user-problem hypothesis for discovery validation",
+		tools.CreateHypothesisSchema(), tools.CreateHypothesis(s))
+	builder.RegisterTool("get_hypothesis",
+		"Get a hypothesis's data, experiments, and validation history",
+		tools.GetHypothesisSchema(), tools.GetHypothesis(s))
+	builder.RegisterTool("list_hypotheses",
+		"List hypotheses, optionally filtered by status or cycle",
+		tools.ListHypothesesSchema(), tools.ListHypotheses(s))
+	builder.RegisterTool("update_hypothesis",
+		"Update a hypothesis's title, problem, target user, or assumption",
+		tools.UpdateHypothesisSchema(), tools.UpdateHypothesis(s))
+	builder.RegisterTool("validate_hypothesis",
+		"Mark a hypothesis as validated with evidence summary",
+		tools.ValidateHypothesisSchema(), tools.ValidateHypothesis(s))
+	builder.RegisterTool("invalidate_hypothesis",
+		"Mark a hypothesis as invalidated with reason",
+		tools.InvalidateHypothesisSchema(), tools.InvalidateHypothesis(s))
+	builder.RegisterTool("refine_hypothesis",
+		"Pivot: create a refined hypothesis from an existing one (marks original as refined)",
+		tools.RefineHypothesisSchema(), tools.RefineHypothesis(s))
+
+	// --- Experiment tools (9) ---
+	builder.RegisterTool("create_experiment",
+		"Create an experiment to test a hypothesis (interview, prototype, landing page, etc.)",
+		tools.CreateExperimentSchema(), tools.CreateExperiment(s))
+	builder.RegisterTool("get_experiment",
+		"Get an experiment's data, signals, and outcome",
+		tools.GetExperimentSchema(), tools.GetExperiment(s))
+	builder.RegisterTool("list_experiments",
+		"List experiments, optionally filtered by status, hypothesis, cycle, or kind",
+		tools.ListExperimentsSchema(), tools.ListExperiments(s))
+	builder.RegisterTool("update_experiment",
+		"Update an experiment's method, success signal, or kill condition (draft only)",
+		tools.UpdateExperimentSchema(), tools.UpdateExperiment(s))
+	builder.RegisterTool("start_experiment",
+		"Move an experiment from draft to running",
+		tools.StartExperimentSchema(), tools.StartExperiment(s))
+	builder.RegisterTool("record_signal",
+		"Record a validation signal on a running experiment (user/behavior/market)",
+		tools.RecordSignalSchema(), tools.RecordSignal(s))
+	builder.RegisterTool("complete_experiment",
+		"Complete an experiment with outcome summary",
+		tools.CompleteExperimentSchema(), tools.CompleteExperiment(s))
+	builder.RegisterTool("abandon_experiment",
+		"Abandon an experiment, optionally marking kill condition as triggered",
+		tools.AbandonExperimentSchema(), tools.AbandonExperiment(s))
+	builder.RegisterTool("spawn_feature_from_experiment",
+		"Create a feature from a completed experiment (bridges discovery into delivery)",
+		tools.SpawnFeatureFromExperimentSchema(), tools.SpawnFeatureFromExperiment(s))
+
+	// --- Discovery Review tools (3) ---
+	builder.RegisterTool("create_discovery_review",
+		"Create a weekly discovery review session for a cycle",
+		tools.CreateDiscoveryReviewSchema(), tools.CreateDiscoveryReview(s))
+	builder.RegisterTool("record_review_decisions",
+		"Record decisions (continue/refine/pivot/stop) for hypotheses and experiments",
+		tools.RecordReviewDecisionsSchema(), tools.RecordReviewDecisions(s))
+	builder.RegisterTool("get_discovery_review",
+		"Get a discovery review's decisions and insights",
+		tools.GetDiscoveryReviewSchema(), tools.GetDiscoveryReview(s))
+
+	// --- Discovery Mode tools (3) ---
+	builder.RegisterTool("set_project_mode",
+		"Set the project's operating mode (discovery/outcome/scale)",
+		tools.SetProjectModeSchema(), tools.SetProjectMode(s))
+	builder.RegisterTool("get_project_mode",
+		"Get the project's current operating mode",
+		tools.GetProjectModeSchema(), tools.GetProjectMode(s))
+	builder.RegisterTool("check_transition_signals",
+		"Analyze whether the project is ready to transition from discovery to outcome mode",
+		tools.CheckTransitionSignalsSchema(), tools.CheckTransitionSignals(s))
+
+	// --- Discovery Reporting tools (1) ---
+	builder.RegisterTool("get_discovery_status",
+		"Get comprehensive discovery dashboard with hypothesis/experiment counts, signals, and kill flags",
+		tools.GetDiscoveryStatusSchema(), tools.GetDiscoveryStatus(s))
 }
