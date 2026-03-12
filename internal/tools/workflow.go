@@ -352,6 +352,9 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		// GUARDRAIL: One feature at a time per assignee.
+		// Skip features locked by OTHER sessions — those belong to parallel
+		// sessions working on the same workspace and don't block this session.
+		sessionID := req.GetSessionId()
 		allFeatures, err := store.ListFeatures(ctx, projectID)
 		if err != nil {
 			return helpers.ErrorResult("storage_error", err.Error()), nil
@@ -363,16 +366,25 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 			if !isActiveStatus(f.Status) {
 				continue
 			}
-			if feat.Assignee == f.Assignee {
-				assigneeMsg := "unassigned"
-				if feat.Assignee != "" {
-					assigneeMsg = fmt.Sprintf("assignee **%s**", feat.Assignee)
-				}
-				return helpers.ErrorResult("wip_violation",
-					fmt.Sprintf("Cannot start **%s** -- feature **%s** (%s) is already **%s** for %s. "+
-						"Finish it through its full lifecycle (-> done) before starting another feature.",
-						featureID, f.ID, f.Title, f.Status, assigneeMsg)), nil
+			if feat.Assignee != f.Assignee {
+				continue
 			}
+			// If the conflicting feature is locked by a different session, it
+			// belongs to a parallel IDE session — don't block this session.
+			if sessionID != "" {
+				lock, _ := globaldb.GetLockInfo(projectID, f.ID)
+				if lock != nil && lock.SessionID != sessionID {
+					continue // Another session owns it — not our WIP.
+				}
+			}
+			assigneeMsg := "unassigned"
+			if feat.Assignee != "" {
+				assigneeMsg = fmt.Sprintf("assignee **%s**", feat.Assignee)
+			}
+			return helpers.ErrorResult("wip_violation",
+				fmt.Sprintf("Cannot start **%s** -- feature **%s** (%s) is already **%s** for %s. "+
+					"Finish it through its full lifecycle (-> done) before starting another feature.",
+					featureID, f.ID, f.Title, f.Status, assigneeMsg)), nil
 		}
 
 		if !types.CanTransition(feat.Status, types.StatusInProgress) {
@@ -381,7 +393,6 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		// SESSION LOCK: acquire exclusive lock for this session.
-		sessionID := req.GetSessionId()
 		if sessionID != "" {
 			if err := globaldb.AcquireLock(projectID, featureID, sessionID); err != nil {
 				return helpers.ErrorResult("session_lock",
