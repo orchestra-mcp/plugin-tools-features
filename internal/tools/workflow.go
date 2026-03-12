@@ -254,6 +254,7 @@ func RejectFeature(store *storage.FeatureStorage) ToolHandler {
 }
 
 // GetNextFeature returns the next feature to work on based on filters.
+// Features locked by other sessions are skipped — they belong to parallel sessions.
 func GetNextFeature(store *storage.FeatureStorage) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "project_id"); err != nil {
@@ -264,6 +265,7 @@ func GetNextFeature(store *storage.FeatureStorage) ToolHandler {
 		statusFilter := helpers.GetString(req.Arguments, "status")
 		assigneeFilter := helpers.GetString(req.Arguments, "assignee")
 		kindFilter := helpers.GetString(req.Arguments, "kind")
+		sessionID := req.GetSessionId()
 
 		features, err := store.ListFeatures(ctx, projectID)
 		if err != nil {
@@ -292,6 +294,13 @@ func GetNextFeature(store *storage.FeatureStorage) ToolHandler {
 					k = "feature"
 				}
 				if k != kindFilter {
+					continue
+				}
+			}
+			// Skip features locked by a different session — they belong to another
+			// parallel IDE session and must not be suggested as next work.
+			if sessionID != "" && isActiveStatus(f.Status) {
+				if lock, _ := globaldb.GetLockInfo(projectID, f.ID); lock != nil && lock.SessionID != sessionID {
 					continue
 				}
 			}

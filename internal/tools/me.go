@@ -149,6 +149,7 @@ func GetMyFeatures(store *storage.FeatureStorage) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		projectID := helpers.GetString(req.Arguments, "project_id")
 		statusFilter := helpers.GetString(req.Arguments, "status")
+		sessionID := req.GetSessionId()
 
 		person, resolvedProject, err := resolveCurrentUser(ctx, store, projectID)
 		if err != nil {
@@ -172,6 +173,6 @@ func GetMyFeatures(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		header := fmt.Sprintf("My Features — %s (%s)", person.Name, resolvedProject)
-		return helpers.TextResult(helpers.FormatFeatureListMD(mine, header)), nil
+		return helpers.TextResult(helpers.FormatFeatureListMDWithLocks(mine, header, resolvedProject, sessionID)), nil
 	}
 }

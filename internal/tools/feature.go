@@ -231,6 +231,7 @@ func ListFeatures(store *storage.FeatureStorage) ToolHandler {
 
 		projectID := helpers.GetString(req.Arguments, "project_id")
 		statusFilter := helpers.GetString(req.Arguments, "status")
+		sessionID := req.GetSessionId()
 
 		features, err := store.ListFeatures(ctx, projectID)
 		if err != nil {
@@ -274,7 +275,7 @@ func ListFeatures(store *storage.FeatureStorage) ToolHandler {
 		} else if kindFilter != "" {
 			header = fmt.Sprintf("Features (kind=%s)", kindFilter)
 		}
-		return helpers.TextResult(helpers.FormatFeatureListMD(features, header)), nil
+		return helpers.TextResult(helpers.FormatFeatureListMDWithLocks(features, header, projectID, sessionID)), nil
 	}
 }
 
