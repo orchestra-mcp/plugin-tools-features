@@ -36,6 +36,8 @@ func ListRequestsSchema() *structpb.Struct {
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"status":     map[string]any{"type": "string", "description": "Filter by status (optional)"},
 			"kind":       map[string]any{"type": "string", "description": "Filter by kind (optional)"},
+			"limit":      map[string]any{"type": "number", "description": "Max results (default 50, max 200)"},
+			"offset":     map[string]any{"type": "number", "description": "Skip first N results (default 0)"},
 		},
 		"required": []any{"project_id"},
 	})
@@ -190,6 +192,10 @@ func ListRequests(store *storage.FeatureStorage) ToolHandler {
 			requests = []*types.RequestData{}
 		}
 
+		total := len(requests)
+		pg := helpers.ParsePagination(req.Arguments)
+		requests = helpers.PaginateSlice(requests, pg)
+
 		header := "Requests"
 		if statusFilter != "" && kindFilter != "" {
 			header = fmt.Sprintf("Requests (%s, %s)", statusFilter, kindFilter)
@@ -198,7 +204,9 @@ func ListRequests(store *storage.FeatureStorage) ToolHandler {
 		} else if kindFilter != "" {
 			header = fmt.Sprintf("Requests (%s)", kindFilter)
 		}
-		return helpers.TextResult(helpers.FormatRequestListMD(requests, header)), nil
+		md := helpers.FormatRequestListMD(requests, header)
+		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(requests), total)
+		return helpers.TextResult(md), nil
 	}
 }
 

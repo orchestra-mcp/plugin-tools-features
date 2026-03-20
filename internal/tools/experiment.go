@@ -54,6 +54,8 @@ func ListExperimentsSchema() *structpb.Struct {
 			"hypothesis_id": map[string]any{"type": "string", "description": "Filter by hypothesis (HYPO-XXX)"},
 			"cycle_id":      map[string]any{"type": "string", "description": "Filter by cycle (DISC-XXX)"},
 			"kind":          map[string]any{"type": "string", "description": "Filter by experiment kind"},
+			"limit":         map[string]any{"type": "number", "description": "Max results (default 50, max 200)"},
+			"offset":        map[string]any{"type": "number", "description": "Skip first N results (default 0)"},
 		},
 		"required": []any{"project_id"},
 	})
@@ -262,7 +264,13 @@ func ListExperiments(store *storage.FeatureStorage) func(ctx context.Context, re
 			filtered = append(filtered, e)
 		}
 
-		return helpers.TextResult(helpers.FormatExperimentListMD(filtered, "Experiments")), nil
+		total := len(filtered)
+		pg := helpers.ParsePagination(req.Arguments)
+		filtered = helpers.PaginateSlice(filtered, pg)
+
+		md := helpers.FormatExperimentListMD(filtered, "Experiments")
+		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(filtered), total)
+		return helpers.TextResult(md), nil
 	}
 }
 

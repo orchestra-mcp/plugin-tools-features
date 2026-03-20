@@ -5,16 +5,20 @@ package internal
 
 import (
 	"github.com/orchestra-mcp/sdk-go/plugin"
+	"github.com/orchestra-mcp/sdk-go/workflow"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/tools"
 )
 
 // FeaturesPlugin holds the shared dependencies for all tool handlers.
 type FeaturesPlugin struct {
-	Storage *storage.FeatureStorage
+	Storage  *storage.FeatureStorage
+	Engine   *workflow.Engine
+	Resolver *workflow.EngineResolver
+	Catalog  plugin.ToolCatalog
 }
 
-// RegisterTools registers all 101 tools on the given plugin builder.
+// RegisterTools registers all 106 tools on the given plugin builder.
 func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	s := fp.Storage
 
@@ -53,24 +57,25 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 		tools.SearchFeaturesSchema(), tools.SearchFeatures(s))
 
 	// --- Workflow tools (5) ---
+	resolver := fp.Resolver
 	builder.RegisterTool("advance_feature",
 		"Advance a feature to the next workflow status",
-		tools.AdvanceFeatureSchema(), tools.AdvanceFeature(s))
+		tools.AdvanceFeatureSchema(), tools.AdvanceFeature(s, resolver))
 	builder.RegisterTool("reject_feature",
 		"Reject a feature, setting it to needs-edits",
-		tools.RejectFeatureSchema(), tools.RejectFeature(s))
+		tools.RejectFeatureSchema(), tools.RejectFeature(s, resolver))
 	builder.RegisterTool("get_next_feature",
 		"Get the next feature to work on based on priority and filters",
 		tools.GetNextFeatureSchema(), tools.GetNextFeature(s))
 	builder.RegisterTool("set_current_feature",
 		"Set a feature's status to in-progress",
-		tools.SetCurrentFeatureSchema(), tools.SetCurrentFeature(s))
+		tools.SetCurrentFeatureSchema(), tools.SetCurrentFeature(s, resolver))
 	builder.RegisterTool("get_workflow_status",
 		"Get feature counts per workflow status",
 		tools.GetWorkflowStatusSchema(), tools.GetWorkflowStatus(s))
 	builder.RegisterTool("get_gate_requirements",
 		"Get the gate requirements for the next transition of a feature. Shows what evidence is needed before advance_feature will succeed.",
-		tools.GetGateRequirementsSchema(), tools.GetGateRequirements(s))
+		tools.GetGateRequirementsSchema(), tools.GetGateRequirements(s, resolver))
 
 	// --- Review tools (2) ---
 	builder.RegisterTool("submit_review",
@@ -134,10 +139,10 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	builder.RegisterTool("set_estimate",
 		"Set the size estimate for a feature (S/M/L/XL)",
 		tools.SetEstimateSchema(), tools.SetEstimate(s))
-	builder.RegisterTool("save_note",
+	builder.RegisterTool("save_feature_note",
 		"Append a note to a feature's body",
 		tools.SaveNoteSchema(), tools.SaveNote(s))
-	builder.RegisterTool("list_notes",
+	builder.RegisterTool("list_feature_notes",
 		"List all notes in a feature's body",
 		tools.ListNotesSchema(), tools.ListNotes(s))
 
@@ -186,6 +191,23 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	builder.RegisterTool("get_next_request",
 		"Get the highest-priority pending request",
 		tools.GetNextRequestSchema(), tools.GetNextRequest(s))
+
+	// --- Delegation tools (5) ---
+	builder.RegisterTool("delegate_feature",
+		"Delegate a question about a feature to another person (feature becomes blocked until answered)",
+		tools.DelegateFeatureSchema(), tools.DelegateFeature(s))
+	builder.RegisterTool("respond_delegation",
+		"Respond to a delegation request (unblocks the feature)",
+		tools.RespondDelegationSchema(), tools.RespondDelegation(s))
+	builder.RegisterTool("get_delegation",
+		"Get a delegation's data and response",
+		tools.GetDelegationSchema(), tools.GetDelegation(s))
+	builder.RegisterTool("list_delegations",
+		"List delegations for a project, feature, or person",
+		tools.ListDelegationsSchema(), tools.ListDelegations(s))
+	builder.RegisterTool("get_pending_delegations",
+		"Get delegations pending response for a specific person",
+		tools.GetPendingDelegationsSchema(), tools.GetPendingDelegations(s))
 
 	// --- Bug tools (1) ---
 	builder.RegisterTool("create_bug_report",
@@ -363,4 +385,34 @@ func (fp *FeaturesPlugin) RegisterTools(builder *plugin.PluginBuilder) {
 	builder.RegisterTool("get_discovery_status",
 		"Get comprehensive discovery dashboard with hypothesis/experiment counts, signals, and kill flags",
 		tools.GetDiscoveryStatusSchema(), tools.GetDiscoveryStatus(s))
+
+	// --- Workflow CRUD tools (5) ---
+	builder.RegisterTool("create_workflow",
+		"Create a new workflow definition for a project (DB-backed, synced across devices)",
+		tools.CreateWorkflowSchema(), tools.CreateWorkflowCRUD(resolver))
+	builder.RegisterTool("get_workflow",
+		"Get a workflow definition by ID or project default",
+		tools.GetWorkflowCRUDSchema(), tools.GetWorkflowCRUD())
+	builder.RegisterTool("update_workflow",
+		"Update a workflow's states, transitions, gates, or metadata",
+		tools.UpdateWorkflowSchema(), tools.UpdateWorkflowCRUD(resolver))
+	builder.RegisterTool("delete_workflow",
+		"Delete a workflow definition",
+		tools.DeleteWorkflowSchema(), tools.DeleteWorkflowCRUD(resolver))
+	builder.RegisterTool("list_workflows",
+		"List all workflow definitions, optionally filtered by project",
+		tools.ListWorkflowsSchema(), tools.ListWorkflowsCRUD())
+
+	// --- MCP Catalog tools (3) ---
+	if fp.Catalog != nil {
+		builder.RegisterTool("list_mcp_tools",
+			"List all registered MCP tools with pagination and optional plugin filter",
+			tools.ListMCPToolsSchema(), tools.ListMCPTools(fp.Catalog))
+		builder.RegisterTool("search_mcp_tools",
+			"Search MCP tools by name or description",
+			tools.SearchMCPToolsSchema(), tools.SearchMCPTools(fp.Catalog))
+		builder.RegisterTool("get_mcp_tool",
+			"Get full details and JSON Schema for a single MCP tool",
+			tools.GetMCPToolSchema(), tools.GetMCPTool(fp.Catalog))
+	}
 }

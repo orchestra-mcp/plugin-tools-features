@@ -3,12 +3,15 @@ package tools
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
+	"github.com/orchestra-mcp/sdk-go/workflow"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -105,13 +108,138 @@ func nextStepHint(featureID string, newStatus types.FeatureStatus) string {
 	}
 }
 
+// nextStepHintStr is the same as nextStepHint but accepts a plain string state
+// (for use with engine-driven workflows where status is not a types.FeatureStatus).
+func nextStepHintStr(featureID string, newStatus string) string {
+	return nextStepHint(featureID, types.FeatureStatus(newStatus))
+}
+
+// ---------- Gate validation helpers (engine-aware) ----------
+
+// filePathPattern matches common file path patterns in evidence text.
+var filePathPattern = regexp.MustCompile(`(?:^|[\s` + "`" + `\-*])([.\w][\w./\-]*\.\w{1,10})(?:\s|$|[,:;()\]` + "`" + `])`)
+
+// extractFilePaths pulls unique file paths out of a text block.
+func extractFilePaths(text string) []string {
+	matches := filePathPattern.FindAllStringSubmatch(text, -1)
+	seen := make(map[string]bool)
+	var paths []string
+	for _, m := range matches {
+		if len(m) > 1 && !seen[m[1]] {
+			seen[m[1]] = true
+			paths = append(paths, m[1])
+		}
+	}
+	return paths
+}
+
+// parseSections extracts markdown ## sections from evidence text.
+func parseSections(text string) map[string]string {
+	sections := make(map[string]string)
+	lines := strings.Split(text, "\n")
+	var currentSection string
+	var currentContent strings.Builder
+	for _, line := range lines {
+		trimLine := strings.TrimSpace(line)
+		if strings.HasPrefix(trimLine, "## ") {
+			if currentSection != "" {
+				sections[currentSection] = currentContent.String()
+			}
+			currentSection = strings.ToLower(strings.TrimSpace(trimLine[3:]))
+			currentContent.Reset()
+		} else if currentSection != "" {
+			if currentContent.Len() > 0 || trimLine != "" {
+				currentContent.WriteString(line)
+				currentContent.WriteString("\n")
+			}
+		}
+	}
+	if currentSection != "" {
+		sections[currentSection] = currentContent.String()
+	}
+	return sections
+}
+
+// matchesFilePattern checks if a file path matches a glob or suffix pattern.
+func matchesFilePattern(path, pattern string) bool {
+	lower := strings.ToLower(path)
+	lowerPattern := strings.ToLower(pattern)
+	if strings.Contains(lowerPattern, "*") {
+		matched, _ := filepath.Match(lowerPattern, lower)
+		if matched {
+			return true
+		}
+		matched, _ = filepath.Match(lowerPattern, filepath.Base(lower))
+		return matched
+	}
+	return strings.HasSuffix(lower, lowerPattern)
+}
+
+// validateGate checks that the evidence satisfies the GateDef requirements.
+// Returns a non-nil error if the evidence is missing or malformed.
+func validateGate(gate *workflow.GateDef, evidence string) error {
+	trimmed := strings.TrimSpace(evidence)
+	if trimmed == "" {
+		return fmt.Errorf("gate %q requires evidence with a ## %s section listing file paths", gate.Label, gate.RequiredSection)
+	}
+	sections := parseSections(trimmed)
+	content, found := sections[strings.ToLower(gate.RequiredSection)]
+	if !found {
+		return fmt.Errorf("evidence missing required section: ## %s", gate.RequiredSection)
+	}
+	if len(strings.TrimSpace(content)) < 10 {
+		return fmt.Errorf("section ## %s has insufficient content (minimum 10 characters)", gate.RequiredSection)
+	}
+	paths := extractFilePaths(content)
+	if len(paths) < 1 {
+		return fmt.Errorf("section ## %s must reference at least 1 file path(s) (found 0). "+
+			"List the actual files changed, e.g.: src/main.go, tests/auth_test.go",
+			gate.RequiredSection)
+	}
+	return nil
+}
+
+// checkFileTypes validates that at least one referenced file matches the gate's
+// expected file patterns or docs folder constraint.
+// Returns (true, nil) when all checks pass or no patterns are configured.
+// Returns (false, expectedPatterns) when none of the files match.
+func checkFileTypes(gate *workflow.GateDef, evidence string) (ok bool, expected []string) {
+	if len(gate.FilePatterns) == 0 && gate.DocsFolder == "" {
+		return true, nil
+	}
+	sections := parseSections(strings.TrimSpace(evidence))
+	content := sections[strings.ToLower(gate.RequiredSection)]
+	paths := extractFilePaths(content)
+	if len(paths) == 0 {
+		return false, gate.FilePatterns
+	}
+	if gate.DocsFolder != "" {
+		for _, p := range paths {
+			if strings.HasPrefix(p, gate.DocsFolder+"/") || strings.HasPrefix(p, gate.DocsFolder+"\\") {
+				if strings.HasSuffix(strings.ToLower(p), ".md") {
+					return true, nil
+				}
+			}
+		}
+		return false, []string{gate.DocsFolder + "/*.md"}
+	}
+	for _, p := range paths {
+		for _, pattern := range gate.FilePatterns {
+			if matchesFilePattern(p, pattern) {
+				return true, nil
+			}
+		}
+	}
+	return false, gate.FilePatterns
+}
+
 // ---------- Handlers ----------
 
 // AdvanceFeature advances a feature to the next valid status in the workflow.
 // Every transition requires evidence with file paths proving the previous phase
 // is complete. File-type validation ensures test gates reference test files and
 // docs gates reference .md files in the docs/ folder.
-func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
+func AdvanceFeature(store *storage.FeatureStorage, resolver *workflow.EngineResolver) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id", "evidence"); err != nil {
 			return helpers.ErrorResult("validation_error", err.Error()), nil
@@ -145,62 +273,80 @@ func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
 			globaldb.RefreshLock(projectID, featureID, sessionID)
 		}
 
-		nextStatuses := types.NextStatuses(feat.Status)
-		if len(nextStatuses) == 0 {
+		// DELEGATION BLOCK CHECK: refuse to advance if feature has pending delegations.
+		if delID, toPerson := HasPendingDelegation(ctx, store, projectID, feat); delID != "" {
+			return helpers.ErrorResult("delegation_blocked",
+				fmt.Sprintf("Feature %s is blocked by pending delegation %s to %s. "+
+					"The delegated person must respond before work can continue. "+
+					"Use `get_delegation` to check status or `respond_delegation` to answer.",
+					featureID, delID, toPerson)), nil
+		}
+
+		eng := resolver.Resolve(projectID)
+		fromState := workflow.StateID(feat.Status)
+		nextStates := eng.NextStates(fromState)
+		if len(nextStates) == 0 {
 			return helpers.ErrorResult("workflow_error",
 				fmt.Sprintf("feature %s is in terminal status %q and cannot be advanced", featureID, feat.Status)), nil
 		}
 
-		// Determine target status.
-		newStatus := nextStatuses[0]
+		// Determine target state. Default to first next state.
+		toState := nextStates[0]
 		oldStatus := feat.Status
 
-		// For bugs/hotfixes/testcases in-testing: skip docs, go to in-review.
-		if oldStatus == types.StatusInTesting && len(nextStatuses) > 1 {
-			kind := feat.Kind
+		// For features in-testing with multiple next states: pick in-review
+		// directly when the feature kind allows skipping docs.
+		if len(nextStates) > 1 {
+			kind := string(feat.Kind)
 			if kind == "" {
-				kind = types.KindFeature
+				kind = string(types.KindFeature)
 			}
-			if kind == types.KindBug || kind == types.KindHotfix || kind == types.KindTestcase {
-				newStatus = types.StatusInReview
+			for _, candidate := range nextStates[1:] {
+				if eng.IsSkippableFor(fromState, candidate, kind) {
+					toState = candidate
+					break
+				}
 			}
 		}
 
-		// Check gate.
-		gate := types.GetGate(oldStatus, newStatus)
+		// Check gate for the chosen transition.
+		gate := eng.Gate(fromState, toState)
 		if gate != nil {
-			if gate.IsSkippableFor(feat.Kind) {
-				body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s): Gate skipped for kind=%s\n", oldStatus, newStatus, helpers.NowISO(), feat.Kind)
+			kind := string(feat.Kind)
+			if kind == "" {
+				kind = string(types.KindFeature)
+			}
+			if eng.IsSkippableFor(fromState, toState, kind) {
+				body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s): Gate skipped for kind=%s\n", oldStatus, toState, helpers.NowISO(), kind)
 			} else {
 				// Validate evidence structure.
-				if err := gate.Validate(evidence); err != nil {
+				if err := validateGate(gate, evidence); err != nil {
 					return helpers.ErrorResult("gate_blocked",
-						fmt.Sprintf("## Gate Blocked: %s\n\n%s", gate.Name, err.Error())), nil
+						fmt.Sprintf("## Gate Blocked: %s\n\n%s", gate.Label, err.Error())), nil
 				}
 
 				// File-type validation (unless force=true after user approval).
 				if !force {
-					ok, expected := gate.CheckFileTypes(evidence)
+					ok, expected := checkFileTypes(gate, evidence)
 					if !ok {
 						return helpers.ErrorResult("needs_approval",
 							fmt.Sprintf("## File Type Mismatch\n\n"+
 								"Evidence for **%s** gate references files that don't match expected patterns.\n\n"+
 								"**Expected:** %s\n\n"+
 								"Ask the user to confirm via `AskUserQuestion`, then retry with `force: true`.",
-								gate.Name, strings.Join(expected, ", "))), nil
+								gate.Label, strings.Join(expected, ", "))), nil
 					}
 				}
 
-				// Append evidence to body.
-				body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s):\n%s\n", oldStatus, newStatus, helpers.NowISO(), evidence)
+				body += fmt.Sprintf("\n\n---\n**%s -> %s** (%s):\n%s\n", oldStatus, toState, helpers.NowISO(), evidence)
 			}
 		}
 
-		feat.Status = newStatus
+		feat.Status = types.FeatureStatus(toState)
 		feat.UpdatedAt = helpers.NowISO()
 
-		// Release session lock when feature reaches done.
-		if newStatus == types.StatusDone && sessionID != "" {
+		// Release session lock when feature reaches a terminal state.
+		if eng.IsTerminal(toState) && sessionID != "" {
 			globaldb.ReleaseLock(projectID, featureID)
 		}
 
@@ -209,14 +355,14 @@ func AdvanceFeature(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("storage_error", err.Error()), nil
 		}
 
-		msg := fmt.Sprintf("Advanced **%s** from **%s** to **%s**", featureID, oldStatus, newStatus)
-		msg += nextStepHint(featureID, newStatus)
+		msg := fmt.Sprintf("Advanced **%s** from **%s** to **%s**", featureID, oldStatus, toState)
+		msg += nextStepHintStr(featureID, string(toState))
 		return helpers.TextResult(msg), nil
 	}
 }
 
 // RejectFeature sets a feature's status to needs-edits.
-func RejectFeature(store *storage.FeatureStorage) ToolHandler {
+func RejectFeature(store *storage.FeatureStorage, resolver *workflow.EngineResolver) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id", "reason"); err != nil {
 			return helpers.ErrorResult("validation_error", err.Error()), nil
@@ -231,7 +377,10 @@ func RejectFeature(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("not_found", err.Error()), nil
 		}
 
-		if !types.CanTransition(feat.Status, types.StatusNeedsEdits) {
+		eng := resolver.Resolve(projectID)
+		fromState := workflow.StateID(feat.Status)
+		toState := workflow.StateID("needs-edits")
+		if !eng.CanTransition(fromState, toState) {
 			return helpers.ErrorResult("workflow_error",
 				fmt.Sprintf("cannot reject feature from status %q", feat.Status)), nil
 		}
@@ -331,7 +480,7 @@ func GetNextFeature(store *storage.FeatureStorage) ToolHandler {
 // - Model capability check (S/M/L/XL vs model tier)
 // - One feature at a time per assignee
 // - Session lock acquisition
-func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
+func SetCurrentFeature(store *storage.FeatureStorage, resolver *workflow.EngineResolver) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id"); err != nil {
 			return helpers.ErrorResult("validation_error", err.Error()), nil
@@ -396,7 +545,10 @@ func SetCurrentFeature(store *storage.FeatureStorage) ToolHandler {
 					featureID, f.ID, f.Title, f.Status, assigneeMsg)), nil
 		}
 
-		if !types.CanTransition(feat.Status, types.StatusInProgress) {
+		eng := resolver.Resolve(projectID)
+		fromState := workflow.StateID(feat.Status)
+		toState := workflow.StateID("in-progress")
+		if !eng.CanTransition(fromState, toState) {
 			return helpers.ErrorResult("workflow_error",
 				fmt.Sprintf("cannot set to in-progress from status %q — feature must be in 'todo' or 'needs-edits'", feat.Status)), nil
 		}
@@ -499,7 +651,7 @@ func GetGateRequirementsSchema() *structpb.Struct {
 	return s
 }
 
-func GetGateRequirements(store *storage.FeatureStorage) ToolHandler {
+func GetGateRequirements(store *storage.FeatureStorage, resolver *workflow.EngineResolver) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "project_id", "feature_id"); err != nil {
 			return helpers.ErrorResult("validation_error", err.Error()), nil
@@ -515,8 +667,11 @@ func GetGateRequirements(store *storage.FeatureStorage) ToolHandler {
 
 		feat.Status = types.MigrateStatus(feat.Status)
 
-		nextStatuses := types.NextStatuses(feat.Status)
-		if len(nextStatuses) == 0 {
+		eng := resolver.Resolve(projectID)
+		fromState := workflow.StateID(feat.Status)
+
+		nextStates := eng.NextStates(fromState)
+		if len(nextStates) == 0 {
 			return helpers.TextResult(fmt.Sprintf(
 				"Feature **%s** is in terminal status **%s**.", featureID, feat.Status)), nil
 		}
@@ -527,19 +682,19 @@ func GetGateRequirements(store *storage.FeatureStorage) ToolHandler {
 					"You MUST ask the user via `AskUserQuestion` first.", featureID)), nil
 		}
 
-		nextStatus := nextStatuses[0]
-		gate := types.GetGate(feat.Status, nextStatus)
+		toState := nextStates[0]
+		gate := eng.Gate(fromState, toState)
 
 		if gate == nil {
 			return helpers.TextResult(fmt.Sprintf(
 				"Feature **%s** is **%s**. Next transition to **%s** is free — call advance_feature.",
-				featureID, feat.Status, nextStatus)), nil
+				featureID, feat.Status, toState)), nil
 		}
 
 		msg := fmt.Sprintf("Feature **%s** is **%s**. Next transition to **%s** requires:\n\n"+
 			"- Section: `## %s`\n"+
-			"- Must include at least %d file path(s)\n",
-			featureID, feat.Status, nextStatus, gate.RequiredSection, gate.MinFilePaths)
+			"- Must include at least 1 file path(s)\n",
+			featureID, feat.Status, toState, gate.RequiredSection)
 
 		if len(gate.FilePatterns) > 0 {
 			msg += fmt.Sprintf("- File types expected: %s\n", strings.Join(gate.FilePatterns, ", "))

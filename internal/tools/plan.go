@@ -47,6 +47,8 @@ func ListPlansSchema() *structpb.Struct {
 		"properties": map[string]any{
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"status":     map[string]any{"type": "string", "description": "Filter by status (optional)"},
+			"limit":      map[string]any{"type": "number", "description": "Max results (default 50, max 200)"},
+			"offset":     map[string]any{"type": "number", "description": "Skip first N results (default 0)"},
 		},
 		"required": []any{"project_id"},
 	})
@@ -85,7 +87,22 @@ func BreakdownPlanSchema() *structpb.Struct {
 		"properties": map[string]any{
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"plan_id":    map[string]any{"type": "string", "description": "Plan ID"},
-			"features":   map[string]any{"type": "string", "description": "JSON array of feature objects with fields: title, description, priority, kind, estimate, depends_on"},
+			"features": map[string]any{
+				"type":        "array",
+				"description": "Array of feature objects with fields: title, description, priority, kind, estimate, depends_on",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"title":       map[string]any{"type": "string"},
+						"description": map[string]any{"type": "string"},
+						"priority":    map[string]any{"type": "string"},
+						"kind":        map[string]any{"type": "string"},
+						"estimate":    map[string]any{"type": "string"},
+						"depends_on":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					},
+					"required": []any{"title"},
+				},
+			},
 		},
 		"required": []any{"project_id", "plan_id", "features"},
 	})
@@ -198,11 +215,17 @@ func ListPlans(store *storage.FeatureStorage) ToolHandler {
 			plans = []*types.PlanData{}
 		}
 
+		total := len(plans)
+		pg := helpers.ParsePagination(req.Arguments)
+		plans = helpers.PaginateSlice(plans, pg)
+
 		header := "Plans"
 		if statusFilter != "" {
 			header = fmt.Sprintf("Plans (%s)", statusFilter)
 		}
-		return helpers.TextResult(helpers.FormatPlanListMD(plans, header)), nil
+		md := helpers.FormatPlanListMD(plans, header)
+		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(plans), total)
+		return helpers.TextResult(md), nil
 	}
 }
 
@@ -292,7 +315,6 @@ func BreakdownPlan(store *storage.FeatureStorage) ToolHandler {
 
 		projectID := helpers.GetString(req.Arguments, "project_id")
 		planID := helpers.GetString(req.Arguments, "plan_id")
-		featuresJSON := helpers.GetString(req.Arguments, "features")
 
 		// Read and validate plan.
 		plan, body, version, err := store.ReadPlan(ctx, projectID, planID)
@@ -300,15 +322,29 @@ func BreakdownPlan(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("not_found", err.Error()), nil
 		}
 
-		if plan.Status != types.PlanApproved {
+		if plan.Status != types.PlanApproved && plan.Status != types.PlanInProgress {
 			return helpers.ErrorResult("invalid_state",
-				fmt.Sprintf("plan %s is %q, must be %q to break down", planID, plan.Status, types.PlanApproved)), nil
+				fmt.Sprintf("plan %s is %q, must be %q or %q to break down", planID, plan.Status, types.PlanApproved, types.PlanInProgress)), nil
 		}
 
-		// Parse features array.
+		// Parse features — accept either a native JSON array or a JSON-encoded string.
 		var defs []breakdownFeature
-		if err := json.Unmarshal([]byte(featuresJSON), &defs); err != nil {
-			return helpers.ErrorResult("validation_error", fmt.Sprintf("invalid features JSON: %s", err.Error())), nil
+		if raw, ok := req.Arguments.Fields["features"]; ok {
+			switch v := raw.Kind.(type) {
+			case *structpb.Value_StringValue:
+				// Legacy: caller passed a JSON-encoded string
+				if err := json.Unmarshal([]byte(v.StringValue), &defs); err != nil {
+					return helpers.ErrorResult("validation_error", fmt.Sprintf("invalid features JSON: %s", err.Error())), nil
+				}
+			case *structpb.Value_ListValue:
+				// Preferred: caller passed a native JSON array
+				b, _ := json.Marshal(v.ListValue.AsSlice())
+				if err := json.Unmarshal(b, &defs); err != nil {
+					return helpers.ErrorResult("validation_error", fmt.Sprintf("invalid features array: %s", err.Error())), nil
+				}
+			default:
+				return helpers.ErrorResult("validation_error", "features must be an array of feature objects"), nil
+			}
 		}
 
 		if len(defs) == 0 {
@@ -318,8 +354,16 @@ func BreakdownPlan(store *storage.FeatureStorage) ToolHandler {
 		now := helpers.NowISO()
 		createdIDs := make([]string, len(defs))
 
-		// Create each feature.
+		// Create each feature. Skip creation if the plan already has this slot filled
+		// (idempotent retry: plan was partially broken down before).
+		existingIDs := plan.Features
 		for i, def := range defs {
+			// Reuse existing ID if the plan already has a feature at this position.
+			if i < len(existingIDs) {
+				createdIDs[i] = existingIDs[i]
+				continue
+			}
+
 			featureID := helpers.NewFeatureID()
 			createdIDs[i] = featureID
 

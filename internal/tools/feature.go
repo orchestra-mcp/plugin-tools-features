@@ -64,6 +64,8 @@ func ListFeaturesSchema() *structpb.Struct {
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"status":     map[string]any{"type": "string", "description": "Filter by status (optional)"},
 			"kind":       map[string]any{"type": "string", "description": "Filter by kind (optional)"},
+			"limit":      map[string]any{"type": "number", "description": "Max results (default 50, max 200)"},
+			"offset":     map[string]any{"type": "number", "description": "Skip first N results (default 0)"},
 		},
 		"required": []any{"project_id"},
 	})
@@ -89,6 +91,8 @@ func SearchFeaturesSchema() *structpb.Struct {
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"query":      map[string]any{"type": "string", "description": "Search query"},
 			"kind":       map[string]any{"type": "string", "description": "Filter by kind (optional)"},
+			"limit":      map[string]any{"type": "number", "description": "Max results (default 50, max 200)"},
+			"offset":     map[string]any{"type": "number", "description": "Skip first N results (default 0)"},
 		},
 		"required": []any{"project_id", "query"},
 	})
@@ -108,6 +112,17 @@ func CreateFeature(store *storage.FeatureStorage) ToolHandler {
 		title := helpers.GetString(req.Arguments, "title")
 		description := helpers.GetString(req.Arguments, "description")
 		priority := helpers.GetStringOr(req.Arguments, "priority", "P2")
+
+		// Validate input lengths.
+		if err := helpers.ValidateLength(projectID, "project_id", helpers.MaxProjectIDLen); err != nil {
+			return helpers.ErrorResult("validation_error", err.Error()), nil
+		}
+		if err := helpers.ValidateLength(title, "title", helpers.MaxFeatureTitleLen); err != nil {
+			return helpers.ErrorResult("validation_error", err.Error()), nil
+		}
+		if err := helpers.ValidateLength(description, "description", helpers.MaxDescriptionLen); err != nil {
+			return helpers.ErrorResult("validation_error", err.Error()), nil
+		}
 
 		// Validate priority.
 		if err := helpers.ValidateOneOf(priority, "P0", "P1", "P2", "P3"); err != nil {
@@ -198,9 +213,15 @@ func UpdateFeature(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		if t := helpers.GetString(req.Arguments, "title"); t != "" {
+			if err := helpers.ValidateLength(t, "title", helpers.MaxFeatureTitleLen); err != nil {
+				return helpers.ErrorResult("validation_error", err.Error()), nil
+			}
 			feat.Title = t
 		}
 		if d := helpers.GetString(req.Arguments, "description"); d != "" {
+			if err := helpers.ValidateLength(d, "description", helpers.MaxDescriptionLen); err != nil {
+				return helpers.ErrorResult("validation_error", err.Error()), nil
+			}
 			feat.Description = d
 		}
 		if p := helpers.GetString(req.Arguments, "priority"); p != "" {
@@ -267,6 +288,10 @@ func ListFeatures(store *storage.FeatureStorage) ToolHandler {
 			features = []*types.FeatureData{}
 		}
 
+		total := len(features)
+		pg := helpers.ParsePagination(req.Arguments)
+		features = helpers.PaginateSlice(features, pg)
+
 		header := "Features"
 		if statusFilter != "" && kindFilter != "" {
 			header = fmt.Sprintf("Features (%s, kind=%s)", statusFilter, kindFilter)
@@ -275,7 +300,9 @@ func ListFeatures(store *storage.FeatureStorage) ToolHandler {
 		} else if kindFilter != "" {
 			header = fmt.Sprintf("Features (kind=%s)", kindFilter)
 		}
-		return helpers.TextResult(helpers.FormatFeatureListMDWithLocks(features, header, projectID, sessionID)), nil
+		md := helpers.FormatFeatureListMDWithLocks(features, header, projectID, sessionID)
+		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(features), total)
+		return helpers.TextResult(md), nil
 	}
 }
 
@@ -307,6 +334,10 @@ func SearchFeatures(store *storage.FeatureStorage) ToolHandler {
 
 		projectID := helpers.GetString(req.Arguments, "project_id")
 		query := strings.ToLower(helpers.GetString(req.Arguments, "query"))
+
+		if err := helpers.ValidateLength(query, "query", helpers.MaxSearchQueryLen); err != nil {
+			return helpers.ErrorResult("validation_error", err.Error()), nil
+		}
 
 		features, err := store.ListFeatures(ctx, projectID)
 		if err != nil {
@@ -341,10 +372,16 @@ func SearchFeatures(store *storage.FeatureStorage) ToolHandler {
 			matches = []*types.FeatureData{}
 		}
 
+		total := len(matches)
+		pg := helpers.ParsePagination(req.Arguments)
+		matches = helpers.PaginateSlice(matches, pg)
+
 		header := fmt.Sprintf("Search results for %q", query)
 		if kindFilter != "" {
 			header = fmt.Sprintf("Search results for %q (kind=%s)", query, kindFilter)
 		}
-		return helpers.TextResult(helpers.FormatFeatureListMD(matches, header)), nil
+		md := helpers.FormatFeatureListMD(matches, header)
+		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(matches), total)
+		return helpers.TextResult(md), nil
 	}
 }

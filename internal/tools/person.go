@@ -50,6 +50,8 @@ func ListPersonsSchema() *structpb.Struct {
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"role":       map[string]any{"type": "string", "description": "Filter by role (optional)", "enum": []any{"developer", "qa", "reviewer", "lead"}},
 			"status":     map[string]any{"type": "string", "description": "Filter by status (optional)", "enum": []any{"active", "inactive"}},
+			"limit":      map[string]any{"type": "number", "description": "Max results (default 50, max 200)"},
+			"offset":     map[string]any{"type": "number", "description": "Skip first N results (default 0)"},
 		},
 		"required": []any{"project_id"},
 	})
@@ -194,7 +196,13 @@ func ListPersons(store *storage.FeatureStorage) ToolHandler {
 			filtered = append(filtered, p)
 		}
 
-		return helpers.TextResult(helpers.FormatPersonListMD(filtered, "Persons")), nil
+		total := len(filtered)
+		pg := helpers.ParsePagination(req.Arguments)
+		filtered = helpers.PaginateSlice(filtered, pg)
+
+		md := helpers.FormatPersonListMD(filtered, "Persons")
+		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(filtered), total)
+		return helpers.TextResult(md), nil
 	}
 }
 

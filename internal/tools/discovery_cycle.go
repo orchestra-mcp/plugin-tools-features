@@ -46,6 +46,8 @@ func ListDiscoveryCyclesSchema() *structpb.Struct {
 		"properties": map[string]any{
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"status":     map[string]any{"type": "string", "description": "Filter by status (active/completed/cancelled)", "enum": []any{"active", "completed", "cancelled"}},
+			"limit":      map[string]any{"type": "number", "description": "Max results (default 50, max 200)"},
+			"offset":     map[string]any{"type": "number", "description": "Skip first N results (default 0)"},
 		},
 		"required": []any{"project_id"},
 	})
@@ -178,7 +180,13 @@ func ListDiscoveryCycles(store *storage.FeatureStorage) func(ctx context.Context
 			cycles = filtered
 		}
 
-		return helpers.TextResult(helpers.FormatDiscoveryCycleListMD(cycles, "Discovery Cycles")), nil
+		total := len(cycles)
+		pg := helpers.ParsePagination(req.Arguments)
+		cycles = helpers.PaginateSlice(cycles, pg)
+
+		md := helpers.FormatDiscoveryCycleListMD(cycles, "Discovery Cycles")
+		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(cycles), total)
+		return helpers.TextResult(md), nil
 	}
 }
 

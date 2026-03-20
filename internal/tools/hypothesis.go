@@ -50,6 +50,8 @@ func ListHypothesesSchema() *structpb.Struct {
 			"project_id": map[string]any{"type": "string", "description": "Project slug"},
 			"status":     map[string]any{"type": "string", "description": "Filter by status", "enum": []any{"untested", "testing", "validated", "invalidated", "refined"}},
 			"cycle_id":   map[string]any{"type": "string", "description": "Filter by cycle (DISC-XXX)"},
+			"limit":      map[string]any{"type": "number", "description": "Max results (default 50, max 200)"},
+			"offset":     map[string]any{"type": "number", "description": "Skip first N results (default 0)"},
 		},
 		"required": []any{"project_id"},
 	})
@@ -208,7 +210,13 @@ func ListHypotheses(store *storage.FeatureStorage) func(ctx context.Context, req
 			filtered = append(filtered, h)
 		}
 
-		return helpers.TextResult(helpers.FormatHypothesisListMD(filtered, "Hypotheses")), nil
+		total := len(filtered)
+		pg := helpers.ParsePagination(req.Arguments)
+		filtered = helpers.PaginateSlice(filtered, pg)
+
+		md := helpers.FormatHypothesisListMD(filtered, "Hypotheses")
+		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(filtered), total)
+		return helpers.TextResult(md), nil
 	}
 }
 

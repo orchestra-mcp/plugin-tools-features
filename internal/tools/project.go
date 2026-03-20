@@ -10,6 +10,7 @@ import (
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
+	"github.com/orchestra-mcp/sdk-go/workflow"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -88,6 +89,9 @@ func CreateProject(store *storage.FeatureStorage) ToolHandler {
 		if err != nil {
 			return helpers.ErrorResult("storage_error", err.Error()), nil
 		}
+
+		// Seed the default workflow for this project in the database.
+		workflow.SeedDefaultWorkflow(slug)
 
 		return helpers.TextResult(fmt.Sprintf("Created project: %s (slug: %s)", name, slug)), nil
 	}

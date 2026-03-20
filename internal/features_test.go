@@ -9,8 +9,16 @@ import (
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/tools"
+	"github.com/orchestra-mcp/sdk-go/workflow"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+// testEng is the default workflow engine used by all tests. It provides the
+// same behaviour as the built-in engine so that tests remain unaffected.
+var testEng = workflow.DefaultEngine()
+
+// testResolver wraps testEng in an EngineResolver for per-project resolution.
+var testResolver = workflow.NewResolver(testEng)
 
 // testEnv sets up an in-memory storage backend and returns the feature storage
 // wrapper plus a context.
@@ -135,7 +143,7 @@ func advanceWithGateEvidence(t *testing.T, store *storage.FeatureStorage, projec
 		// All transitions via advance_feature require evidence now.
 		args["evidence"] = "## Changes\n- placeholder/file.go (transition evidence)"
 	}
-	resp := callTool(t, tools.AdvanceFeature(store), args)
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), args)
 	if !resp.Success {
 		t.Fatalf("advance from %s failed: %s", from, resp.ErrorMessage)
 	}
@@ -144,7 +152,7 @@ func advanceWithGateEvidence(t *testing.T, store *storage.FeatureStorage, projec
 // startFeature uses set_current_feature to move a feature from todo to in-progress.
 func startFeature(t *testing.T, store *storage.FeatureStorage, projectID, featureID string) {
 	t.Helper()
-	resp := callTool(t, tools.SetCurrentFeature(store), map[string]any{
+	resp := callTool(t, tools.SetCurrentFeature(store, testResolver), map[string]any{
 		"project_id": projectID,
 		"feature_id": featureID,
 	})
@@ -315,7 +323,7 @@ func TestWorkflowAdvance(t *testing.T) {
 	}
 
 	// Advancing from done should fail (evidence is required but status is terminal).
-	resp = callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp = callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "workflow-test",
 		"feature_id": featureID,
 		"evidence":   "## Changes\n- some/file.go (trying to advance from done)",
@@ -340,7 +348,7 @@ func TestWorkflowReject(t *testing.T) {
 	advanceWithGateEvidence(t, store, "reject-test", featureID, "in-docs")
 
 	// Reject from in-review.
-	resp := callTool(t, tools.RejectFeature(store), map[string]any{
+	resp := callTool(t, tools.RejectFeature(store, testResolver), map[string]any{
 		"project_id": "reject-test",
 		"feature_id": featureID,
 		"reason":     "Missing error handling",
@@ -357,7 +365,7 @@ func TestWorkflowReject(t *testing.T) {
 	}
 
 	// From needs-edits, can go back to in-progress via set_current_feature.
-	resp = callTool(t, tools.SetCurrentFeature(store), map[string]any{
+	resp = callTool(t, tools.SetCurrentFeature(store, testResolver), map[string]any{
 		"project_id": "reject-test",
 		"feature_id": featureID,
 	})
@@ -892,7 +900,7 @@ func TestGateBlocksWithoutEvidence(t *testing.T) {
 
 	// advance_feature now requires evidence as a required parameter.
 	// Calling without evidence should fail with validation_error.
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "gate-block-test",
 		"feature_id": featureID,
 	})
@@ -913,7 +921,7 @@ func TestGateBlocksWithMissingSections(t *testing.T) {
 	startFeature(t, store, "gate-missing-test", featureID)
 
 	// Provide evidence with wrong section (## Summary instead of ## Changes).
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "gate-missing-test",
 		"feature_id": featureID,
 		"evidence":   "## Summary\nImplemented the entire login flow with full OAuth2 support including token refresh, PKCE verification, and error handling for all edge cases.",
@@ -938,7 +946,7 @@ func TestGateBlocksWithEmptySections(t *testing.T) {
 	startFeature(t, store, "gate-empty-test", featureID)
 
 	// ## Changes section is present but empty (no file paths).
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "gate-empty-test",
 		"feature_id": featureID,
 		"evidence":   "## Changes\n\n\n",
@@ -963,7 +971,7 @@ func TestGatePassesWithValidEvidence(t *testing.T) {
 	startFeature(t, store, "gate-pass-test", featureID)
 
 	// Code Complete gate: valid evidence with ## Changes and file paths.
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "gate-pass-test",
 		"feature_id": featureID,
 		"evidence":   codeCompleteEvidence,
@@ -987,7 +995,7 @@ func TestGate2PassesWithValidEvidence(t *testing.T) {
 	advanceWithGateEvidence(t, store, "gate2-pass-test", featureID, "in-progress")
 
 	// Test Complete gate: valid evidence with ## Results and test file paths.
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "gate2-pass-test",
 		"feature_id": featureID,
 		"evidence":   testCompleteEvidence,
@@ -1007,7 +1015,7 @@ func TestSetCurrentFeatureFromTodo(t *testing.T) {
 	featureID := createTestFeature(t, store, "start-test", "Startable Feature")
 
 	// set_current_feature moves todo -> in-progress.
-	resp := callTool(t, tools.SetCurrentFeature(store), map[string]any{
+	resp := callTool(t, tools.SetCurrentFeature(store, testResolver), map[string]any{
 		"project_id": "start-test",
 		"feature_id": featureID,
 	})
@@ -1032,14 +1040,14 @@ func TestSetCurrentFeatureFromNeedsEdits(t *testing.T) {
 	advanceWithGateEvidence(t, store, "restart-test", featureID, "in-docs")
 
 	// Reject to needs-edits.
-	callTool(t, tools.RejectFeature(store), map[string]any{
+	callTool(t, tools.RejectFeature(store, testResolver), map[string]any{
 		"project_id": "restart-test",
 		"feature_id": featureID,
 		"reason":     "Needs fixes",
 	})
 
 	// set_current_feature from needs-edits -> in-progress.
-	resp := callTool(t, tools.SetCurrentFeature(store), map[string]any{
+	resp := callTool(t, tools.SetCurrentFeature(store, testResolver), map[string]any{
 		"project_id": "restart-test",
 		"feature_id": featureID,
 	})
@@ -1061,7 +1069,7 @@ func TestSetCurrentFeatureBlockedFromInProgress(t *testing.T) {
 	startFeature(t, store, "block-start-test", featureID)
 
 	// Trying set_current_feature again from in-progress should fail.
-	resp := callTool(t, tools.SetCurrentFeature(store), map[string]any{
+	resp := callTool(t, tools.SetCurrentFeature(store, testResolver), map[string]any{
 		"project_id": "block-start-test",
 		"feature_id": featureID,
 	})
@@ -1085,7 +1093,7 @@ func TestAdvanceFromInReviewBlocked(t *testing.T) {
 	advanceWithGateEvidence(t, store, "review-block-test", featureID, "in-docs")
 
 	// advance_feature from in-review should be blocked.
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "review-block-test",
 		"feature_id": featureID,
 		"evidence":   "## Changes\n- some/file.go (trying to self-approve)",
@@ -1107,7 +1115,7 @@ func TestGetGateRequirements(t *testing.T) {
 	featureID := createTestFeature(t, store, "gate-req-test", "Gate Req Feature")
 
 	// From todo -- should mention set_current_feature (no gate, but not "free" via advance).
-	resp := callTool(t, tools.GetGateRequirements(store), map[string]any{
+	resp := callTool(t, tools.GetGateRequirements(store, testResolver), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
 	})
@@ -1124,7 +1132,7 @@ func TestGetGateRequirements(t *testing.T) {
 	startFeature(t, store, "gate-req-test", featureID)
 
 	// From in-progress -- should show Code Complete gate with ## Changes.
-	resp = callTool(t, tools.GetGateRequirements(store), map[string]any{
+	resp = callTool(t, tools.GetGateRequirements(store, testResolver), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
 	})
@@ -1140,7 +1148,7 @@ func TestGetGateRequirements(t *testing.T) {
 	advanceWithGateEvidence(t, store, "gate-req-test", featureID, "in-progress")
 
 	// From in-testing -- should show Test Complete gate with ## Results.
-	resp = callTool(t, tools.GetGateRequirements(store), map[string]any{
+	resp = callTool(t, tools.GetGateRequirements(store, testResolver), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
 	})
@@ -1156,7 +1164,7 @@ func TestGetGateRequirements(t *testing.T) {
 	advanceWithGateEvidence(t, store, "gate-req-test", featureID, "in-testing")
 
 	// From in-docs -- should show Docs Complete gate with ## Docs.
-	resp = callTool(t, tools.GetGateRequirements(store), map[string]any{
+	resp = callTool(t, tools.GetGateRequirements(store, testResolver), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
 	})
@@ -1172,7 +1180,7 @@ func TestGetGateRequirements(t *testing.T) {
 	advanceWithGateEvidence(t, store, "gate-req-test", featureID, "in-docs")
 
 	// From in-review -- should mention submit_review.
-	resp = callTool(t, tools.GetGateRequirements(store), map[string]any{
+	resp = callTool(t, tools.GetGateRequirements(store, testResolver), map[string]any{
 		"project_id": "gate-req-test",
 		"feature_id": featureID,
 	})
@@ -1200,7 +1208,7 @@ func TestBugSkipsDocs(t *testing.T) {
 	advanceWithGateEvidence(t, store, "bug-skip-test", featureID, "in-progress")
 
 	// From in-testing, bugs should go to in-review (skipping in-docs).
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "bug-skip-test",
 		"feature_id": featureID,
 		"evidence":   testCompleteEvidence,
@@ -1225,7 +1233,7 @@ func TestHotfixSkipsDocs(t *testing.T) {
 	advanceWithGateEvidence(t, store, "hotfix-skip-test", featureID, "in-progress")
 
 	// From in-testing, hotfixes should go to in-review (skipping in-docs).
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "hotfix-skip-test",
 		"feature_id": featureID,
 		"evidence":   testCompleteEvidence,
@@ -1250,7 +1258,7 @@ func TestTestcaseSkipsDocs(t *testing.T) {
 	advanceWithGateEvidence(t, store, "testcase-skip-test", featureID, "in-progress")
 
 	// From in-testing, testcases should go to in-review (skipping in-docs).
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "testcase-skip-test",
 		"feature_id": featureID,
 		"evidence":   testCompleteEvidence,
@@ -1275,7 +1283,7 @@ func TestFeatureDoesNotSkipDocs(t *testing.T) {
 	advanceWithGateEvidence(t, store, "no-skip-test", featureID, "in-progress")
 
 	// From in-testing, regular features should go to in-docs (not skip).
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "no-skip-test",
 		"feature_id": featureID,
 		"evidence":   testCompleteEvidence,
@@ -1299,7 +1307,7 @@ func TestGateBlocksWithNoFilePaths(t *testing.T) {
 	startFeature(t, store, "no-paths-test", featureID)
 
 	// ## Changes present but no file paths in it.
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "no-paths-test",
 		"feature_id": featureID,
 		"evidence":   "## Changes\nMade various improvements to the codebase and refactored the module.",
@@ -1328,7 +1336,7 @@ func TestDocsGateRequiresDocsFolder(t *testing.T) {
 	advanceWithGateEvidence(t, store, "docs-folder-test", featureID, "in-testing")
 
 	// Try advancing with ## Docs referencing files NOT in docs/ folder.
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "docs-folder-test",
 		"feature_id": featureID,
 		"evidence":   "## Docs\n- src/readme.md (updated readme in source dir)",
@@ -1352,7 +1360,7 @@ func TestAdvanceRequiresEvidenceParameter(t *testing.T) {
 	startFeature(t, store, "ev-required-test", featureID)
 
 	// Calling advance_feature without evidence should return validation_error.
-	resp := callTool(t, tools.AdvanceFeature(store), map[string]any{
+	resp := callTool(t, tools.AdvanceFeature(store, testResolver), map[string]any{
 		"project_id": "ev-required-test",
 		"feature_id": featureID,
 	})

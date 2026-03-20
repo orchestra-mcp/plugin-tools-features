@@ -1166,3 +1166,97 @@ func metadataToDiscoveryReview(meta *structpb.Struct) (*types.DiscoveryReviewDat
 	}
 	return &r, nil
 }
+
+// ---------- Delegation operations ----------
+
+// ReadDelegation loads a delegation by project slug and delegation ID.
+func (fs *FeatureStorage) ReadDelegation(ctx context.Context, projectSlug, delegationID string) (*types.DelegationData, string, int64, error) {
+	path := filepath.Join(projectSlug, helpers.DelegationsDir, delegationID+".md")
+	resp, err := fs.storageRead(ctx, path)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("read delegation %s/%s: %w", projectSlug, delegationID, err)
+	}
+	del, err := metadataToDelegation(resp.Metadata)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("parse delegation %s/%s: %w", projectSlug, delegationID, err)
+	}
+	return del, string(resp.Content), resp.Version, nil
+}
+
+// WriteDelegation persists a delegation to storage.
+func (fs *FeatureStorage) WriteDelegation(ctx context.Context, projectSlug, delegationID string, data *types.DelegationData, body string, expectedVersion int64) (int64, error) {
+	meta, err := delegationToMetadata(data)
+	if err != nil {
+		return 0, fmt.Errorf("encode delegation: %w", err)
+	}
+	path := filepath.Join(projectSlug, helpers.DelegationsDir, delegationID+".md")
+	return fs.storageWrite(ctx, path, meta, []byte(body), expectedVersion)
+}
+
+// ListDelegations returns all delegations for a project.
+func (fs *FeatureStorage) ListDelegations(ctx context.Context, projectSlug string) ([]*types.DelegationData, error) {
+	prefix := filepath.Join(projectSlug, helpers.DelegationsDir) + string(filepath.Separator)
+	entries, err := fs.storageList(ctx, prefix, "*.md")
+	if err != nil {
+		return nil, fmt.Errorf("list delegations: %w", err)
+	}
+	var delegations []*types.DelegationData
+	for _, entry := range entries {
+		base := filepath.Base(entry.Path)
+		delegationID := strings.TrimSuffix(base, ".md")
+		d, _, _, err := fs.ReadDelegation(ctx, projectSlug, delegationID)
+		if err != nil {
+			continue
+		}
+		delegations = append(delegations, d)
+	}
+	return delegations, nil
+}
+
+// DeleteDelegation removes a delegation from storage.
+func (fs *FeatureStorage) DeleteDelegation(ctx context.Context, projectSlug, delegationID string) error {
+	path := filepath.Join(projectSlug, helpers.DelegationsDir, delegationID+".md")
+	return fs.storageDelete(ctx, path)
+}
+
+// ---------- Delegation metadata conversion ----------
+
+func delegationToMetadata(d *types.DelegationData) (*structpb.Struct, error) {
+	m := map[string]any{
+		"id":          d.ID,
+		"project_id":  d.ProjectID,
+		"feature_id":  d.FeatureID,
+		"from_person": d.FromPerson,
+		"to_person":   d.ToPerson,
+		"question":    d.Question,
+		"status":      string(d.Status),
+		"version":     float64(d.Version),
+		"created_at":  d.CreatedAt,
+		"updated_at":  d.UpdatedAt,
+	}
+	if d.Context != "" {
+		m["context"] = d.Context
+	}
+	if d.Response != "" {
+		m["response"] = d.Response
+	}
+	if d.RespondedAt != "" {
+		m["responded_at"] = d.RespondedAt
+	}
+	return structpb.NewStruct(m)
+}
+
+func metadataToDelegation(meta *structpb.Struct) (*types.DelegationData, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("no metadata")
+	}
+	raw, err := json.Marshal(meta.AsMap())
+	if err != nil {
+		return nil, err
+	}
+	var d types.DelegationData
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
