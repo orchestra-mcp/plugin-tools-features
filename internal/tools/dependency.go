@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
-	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
+	"github.com/orchestra-mcp/sdk-go/helpers"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -164,9 +164,15 @@ func GetDependencyGraph(store *storage.FeatureStorage) ToolHandler {
 		fmt.Fprintf(&b, "## Dependency Graph (%d features)\n\n", len(features))
 
 		hasEdges := false
+		type edge struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		var edges []edge
 		for _, f := range features {
 			for _, dep := range f.DependsOn {
 				fmt.Fprintf(&b, "- **%s** depends on **%s**\n", f.ID, dep)
+				edges = append(edges, edge{From: f.ID, To: dep})
 				hasEdges = true
 			}
 		}
@@ -174,7 +180,11 @@ func GetDependencyGraph(store *storage.FeatureStorage) ToolHandler {
 			b.WriteString("No dependencies found.\n")
 		}
 
-		return helpers.TextResult(b.String()), nil
+		ui := helpers.DependencyTreeUI(map[string]any{
+			"features": features,
+			"edges":    edges,
+		})
+		return helpers.RichResult(b.String(), ui), nil
 	}
 }
 

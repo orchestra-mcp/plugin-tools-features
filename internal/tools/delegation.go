@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
-	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -176,7 +176,8 @@ func DelegateFeature(store *storage.FeatureStorage) ToolHandler {
 
 		md := fmt.Sprintf("Created delegation **%s**\n\n%s\nFeature **%s** is now blocked until **%s** responds.\n",
 			delegationID, helpers.FormatDelegationMD(d), featureID, toPerson)
-		return helpers.TextResult(md), nil
+		ui := helpers.DelegationDetailUI(d)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -259,7 +260,8 @@ func GetDelegation(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := helpers.FormatDelegationMD(d) + "---\n\n" + body
-		return helpers.TextResult(md), nil
+		ui := helpers.DelegationDetailUI(d)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -324,7 +326,8 @@ func ListDelegations(store *storage.FeatureStorage) ToolHandler {
 		}
 		md := helpers.FormatDelegationListMD(delegations, header)
 		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(delegations), total)
-		return helpers.TextResult(md), nil
+		ui := helpers.DelegationListUI(delegations, pg, total)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -354,8 +357,10 @@ func GetPendingDelegations(store *storage.FeatureStorage) ToolHandler {
 			pending = []*types.DelegationData{}
 		}
 
+		pg := helpers.PaginationParams{Limit: len(pending), Offset: 0}
 		md := helpers.FormatDelegationListMD(pending, fmt.Sprintf("Pending Delegations for %s", personID))
-		return helpers.TextResult(md), nil
+		ui := helpers.DelegationListUI(pending, pg, len(pending))
+		return helpers.RichResult(md, ui), nil
 	}
 }
 

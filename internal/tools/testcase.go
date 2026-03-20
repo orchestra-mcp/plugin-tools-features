@@ -108,7 +108,8 @@ func CreateTestCase(store *storage.FeatureStorage) ToolHandler {
 		applyAutoAssignment(ctx, store, projectID, featureID, string(types.KindTestcase))
 
 		md := fmt.Sprintf("Created test case **%s**: %s\n\n%s", featureID, title, helpers.FormatFeatureMD(feat))
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureDetailUI(feat)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 

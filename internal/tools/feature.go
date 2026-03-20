@@ -6,10 +6,10 @@ import (
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
-	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -166,7 +166,10 @@ func CreateFeature(store *storage.FeatureStorage) ToolHandler {
 		applyAutoAssignment(ctx, store, projectID, featureID, kind)
 
 		md := fmt.Sprintf("Created **%s**: %s\n\n%s", featureID, title, helpers.FormatFeatureMD(feat))
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureDetailUI(feat,
+			helpers.UIAction{Label: "Start Working", Tool: "set_current_feature", Params: map[string]any{"project_id": projectID, "feature_id": featureID}, Kind: "primary"},
+		)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -193,7 +196,10 @@ func GetFeature(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md += "\n---\n\n" + body
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureDetailUI(feat,
+			helpers.UIAction{Label: "Update", Tool: "update_feature", Params: map[string]any{"project_id": projectID, "feature_id": featureID}, Kind: "secondary"},
+		)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -239,7 +245,8 @@ func UpdateFeature(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := fmt.Sprintf("Updated **%s**\n\n%s", featureID, helpers.FormatFeatureMD(feat))
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureDetailUI(feat)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -302,7 +309,10 @@ func ListFeatures(store *storage.FeatureStorage) ToolHandler {
 		}
 		md := helpers.FormatFeatureListMDWithLocks(features, header, projectID, sessionID)
 		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(features), total)
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureListUI(features, pg, total,
+			helpers.UIAction{Label: "Create Feature", Tool: "create_feature", Params: map[string]any{"project_id": projectID}, Kind: "primary"},
+		)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -382,6 +392,7 @@ func SearchFeatures(store *storage.FeatureStorage) ToolHandler {
 		}
 		md := helpers.FormatFeatureListMD(matches, header)
 		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(matches), total)
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureListUI(matches, pg, total)
+		return helpers.RichResult(md, ui), nil
 	}
 }

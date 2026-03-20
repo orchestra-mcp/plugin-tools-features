@@ -91,6 +91,12 @@ func CreateBugReport(store *storage.FeatureStorage) ToolHandler {
 		applyAutoAssignment(ctx, store, projectID, featureID, string(types.KindBug))
 
 		md := fmt.Sprintf("Created bug **%s**: %s\n\n%s", featureID, title, helpers.FormatFeatureMD(feat))
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureDetailUI(feat, helpers.UIAction{
+			Label:  "Start Working",
+			Tool:   "set_current_feature",
+			Params: map[string]any{"project_id": projectID, "feature_id": featureID},
+			Kind:   "primary",
+		})
+		return helpers.RichResult(md, ui), nil
 	}
 }

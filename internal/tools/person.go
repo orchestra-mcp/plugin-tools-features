@@ -145,7 +145,8 @@ func CreatePerson(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := fmt.Sprintf("Created person **%s**: %s (%s)\n\n%s", personID, name, role, helpers.FormatPersonMD(person))
-		return helpers.TextResult(md), nil
+		ui := helpers.PersonDetailUI(person)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -164,7 +165,8 @@ func GetPerson(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("not_found", err.Error()), nil
 		}
 
-		return helpers.TextResult(helpers.FormatPersonMD(person)), nil
+		ui := helpers.PersonDetailUI(person)
+		return helpers.RichResult(helpers.FormatPersonMD(person), ui), nil
 	}
 }
 
@@ -202,7 +204,8 @@ func ListPersons(store *storage.FeatureStorage) ToolHandler {
 
 		md := helpers.FormatPersonListMD(filtered, "Persons")
 		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(filtered), total)
-		return helpers.TextResult(md), nil
+		ui := helpers.PersonListUI(filtered, pg, total)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -261,7 +264,8 @@ func UpdatePerson(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := fmt.Sprintf("Updated **%s**\n\n%s", personID, helpers.FormatPersonMD(person))
-		return helpers.TextResult(md), nil
+		ui := helpers.PersonDetailUI(person)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 

@@ -5,10 +5,10 @@ import (
 	"fmt"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
-	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -133,7 +133,8 @@ func GetPendingReviews(store *storage.FeatureStorage) ToolHandler {
 			pending = []*types.FeatureData{}
 		}
 
-		return helpers.TextResult(helpers.FormatFeatureListMD(pending, "Pending Reviews")), nil
+		pg := helpers.PaginationParams{Limit: len(pending), Offset: 0}
+		ui := helpers.FeatureListUI(pending, pg, len(pending))
+		return helpers.RichResult(helpers.FormatFeatureListMD(pending, "Pending Reviews"), ui), nil
 	}
 }
-

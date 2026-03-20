@@ -206,7 +206,9 @@ func ListAssignmentRules(store *storage.FeatureStorage) ToolHandler {
 			return helpers.ErrorResult("storage_error", err.Error()), nil
 		}
 
-		return helpers.TextResult(helpers.FormatAssignmentRuleListMD(rules, "Assignment Rules")), nil
+		pg := helpers.PaginationParams{Limit: len(rules), Offset: 0}
+		ui := helpers.AssignmentRuleListUI(rules, pg, len(rules))
+		return helpers.RichResult(helpers.FormatAssignmentRuleListMD(rules, "Assignment Rules"), ui), nil
 	}
 }
 
@@ -287,6 +289,8 @@ func GetPersonWorkload(store *storage.FeatureStorage) ToolHandler {
 		fmt.Fprintf(&b, "\n")
 		fmt.Fprintf(&b, "%s", helpers.FormatFeatureListMD(assigned, "Assigned Features"))
 
-		return helpers.TextResult(b.String()), nil
+		pg := helpers.PaginationParams{Limit: len(assigned), Offset: 0}
+		ui := helpers.FeatureListUI(assigned, pg, len(assigned))
+		return helpers.RichResult(b.String(), ui), nil
 	}
 }

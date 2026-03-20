@@ -6,9 +6,9 @@ import (
 	"sort"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
-	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -148,7 +148,8 @@ func CreateRequest(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := fmt.Sprintf("Created **%s**: %s\n\n%s", requestID, title, helpers.FormatRequestMD(r))
-		return helpers.TextResult(md), nil
+		ui := helpers.RequestDetailUI(r)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -206,7 +207,8 @@ func ListRequests(store *storage.FeatureStorage) ToolHandler {
 		}
 		md := helpers.FormatRequestListMD(requests, header)
 		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(requests), total)
-		return helpers.TextResult(md), nil
+		ui := helpers.RequestListUI(requests, pg, total)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -226,7 +228,8 @@ func GetRequest(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := helpers.FormatRequestMD(r) + "---\n\n" + body
-		return helpers.TextResult(md), nil
+		ui := helpers.RequestDetailUI(r)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -291,7 +294,10 @@ func ConvertRequest(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := fmt.Sprintf("Converted **%s** → **%s**\n\n%s", requestID, featureID, helpers.FormatFeatureMD(feat))
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureDetailUI(feat,
+			helpers.UIAction{Label: "Start Working", Tool: "set_current_feature", Params: map[string]any{"project_id": projectID, "feature_id": featureID}, Kind: "primary"},
+		)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -370,7 +376,10 @@ func GetNextRequest(store *storage.FeatureStorage) ToolHandler {
 			return priorityRank(pending[i].Priority) < priorityRank(pending[j].Priority)
 		})
 
-		return helpers.TextResult(helpers.FormatRequestMD(pending[0])), nil
+		ui := helpers.RequestDetailUI(pending[0],
+			helpers.UIAction{Label: "Convert", Tool: "convert_request", Params: map[string]any{"project_id": projectID, "request_id": pending[0].ID}, Kind: "primary"},
+		)
+		return helpers.RichResult(helpers.FormatRequestMD(pending[0]), ui), nil
 	}
 }
 

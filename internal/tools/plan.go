@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
-	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -162,7 +162,10 @@ func CreatePlan(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := fmt.Sprintf("Created **%s**: %s\n\n%s", planID, title, helpers.FormatPlanMD(plan))
-		return helpers.TextResult(md), nil
+		ui := helpers.PlanDetailUI(plan,
+			helpers.UIAction{Label: "Approve", Tool: "approve_plan", Params: map[string]any{"project_id": projectID, "plan_id": planID}, Kind: "primary"},
+		)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -182,7 +185,8 @@ func GetPlan(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := helpers.FormatPlanMD(plan) + "\n---\n\n" + body
-		return helpers.TextResult(md), nil
+		ui := helpers.PlanDetailUI(plan)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -225,7 +229,8 @@ func ListPlans(store *storage.FeatureStorage) ToolHandler {
 		}
 		md := helpers.FormatPlanListMD(plans, header)
 		md += fmt.Sprintf("\n*Showing %d-%d of %d total*\n", pg.Offset+1, pg.Offset+len(plans), total)
-		return helpers.TextResult(md), nil
+		ui := helpers.PlanListUI(plans, pg, total)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -260,7 +265,8 @@ func UpdatePlan(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := fmt.Sprintf("Updated **%s**\n\n%s", planID, helpers.FormatPlanMD(plan))
-		return helpers.TextResult(md), nil
+		ui := helpers.PlanDetailUI(plan)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 

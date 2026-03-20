@@ -106,7 +106,8 @@ func SetCurrentUser(store *storage.FeatureStorage) ToolHandler {
 
 		md := fmt.Sprintf("Set current user for project **%s** to **%s** (%s, %s)\n\n%s",
 			projectID, person.Name, personID, person.Role, helpers.FormatPersonMD(person))
-		return helpers.TextResult(md), nil
+		ui := helpers.PersonDetailUI(person)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -140,7 +141,8 @@ func GetCurrentUser(store *storage.FeatureStorage) ToolHandler {
 		} else {
 			b.WriteString("\nNo features assigned.\n")
 		}
-		return helpers.TextResult(b.String()), nil
+		ui := helpers.PersonDetailUI(person)
+		return helpers.RichResult(b.String(), ui), nil
 	}
 }
 
@@ -173,6 +175,9 @@ func GetMyFeatures(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		header := fmt.Sprintf("My Features — %s (%s)", person.Name, resolvedProject)
-		return helpers.TextResult(helpers.FormatFeatureListMDWithLocks(mine, header, resolvedProject, sessionID)), nil
+		md := helpers.FormatFeatureListMDWithLocks(mine, header, resolvedProject, sessionID)
+		pg := helpers.PaginationParams{Limit: len(mine), Offset: 0}
+		ui := helpers.FeatureListUI(mine, pg, len(mine))
+		return helpers.RichResult(md, ui), nil
 	}
 }

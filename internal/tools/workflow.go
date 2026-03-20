@@ -8,11 +8,11 @@ import (
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
 	"github.com/orchestra-mcp/sdk-go/workflow"
-	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -469,7 +469,10 @@ func GetNextFeature(store *storage.FeatureStorage) ToolHandler {
 
 		md := fmt.Sprintf("**Next feature:**\n\n%s", helpers.FormatFeatureMD(best))
 		md += fmt.Sprintf("\n**Next step:** Call `set_current_feature` with feature_id `%s` to start working on it.", best.ID)
-		return helpers.TextResult(md), nil
+		ui := helpers.FeatureDetailUI(best,
+			helpers.UIAction{Label: "Start Working", Tool: "set_current_feature", Params: map[string]any{"project_id": projectID, "feature_id": best.ID}, Kind: "primary"},
+		)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -578,7 +581,8 @@ func SetCurrentFeature(store *storage.FeatureStorage, resolver *workflow.EngineR
 			msg += "\n---\n\n" + body
 		}
 		msg += nextStepHint(featureID, types.StatusInProgress)
-		return helpers.TextResult(msg), nil
+		ui := helpers.FeatureDetailUI(feat)
+		return helpers.RichResult(msg, ui), nil
 	}
 }
 
@@ -728,6 +732,7 @@ func GetWorkflowStatus(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := fmt.Sprintf("## Workflow Status: %s\n\n", projectID) + helpers.FormatStatusCountsMD(statusCounts, len(features))
-		return helpers.TextResult(md), nil
+		ui := helpers.WorkflowKanbanUI(features, statusCounts, len(features))
+		return helpers.RichResult(md, ui), nil
 	}
 }

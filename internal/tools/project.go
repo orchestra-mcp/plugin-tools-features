@@ -8,10 +8,10 @@ import (
 	"fmt"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
 	"github.com/orchestra-mcp/sdk-go/workflow"
-	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -151,6 +151,19 @@ func GetProjectStatus(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		md := helpers.FormatProjectMD(proj) + "\n" + helpers.FormatStatusCountsMD(statusCounts, len(features))
-		return helpers.TextResult(md), nil
+
+		done := statusCounts[string(types.StatusDone)]
+		var pctDone float64
+		if len(features) > 0 {
+			pctDone = float64(done) / float64(len(features)) * 100
+		}
+		ui := helpers.ProjectDetailUI(map[string]any{
+			"project":       proj,
+			"total":         len(features),
+			"done":          done,
+			"percent_done":  pctDone,
+			"status_counts": statusCounts,
+		})
+		return helpers.RichResult(md, ui), nil
 	}
 }

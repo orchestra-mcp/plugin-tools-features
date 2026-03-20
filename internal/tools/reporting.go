@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"github.com/orchestra-mcp/sdk-go/helpers"
 	"github.com/orchestra-mcp/sdk-go/types"
-	"github.com/orchestra-mcp/plugin-tools-features/internal/storage"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -81,7 +81,8 @@ func GetProgress(store *storage.FeatureStorage) ToolHandler {
 
 		md := fmt.Sprintf("## Progress: %s\n\n- **Total features:** %d\n- **Done:** %d\n- **Completion:** %.1f%%\n\n%s",
 			projectID, total, done, pctDone, helpers.FormatStatusCountsMD(statusCounts, total))
-		return helpers.TextResult(md), nil
+		ui := helpers.ProgressUI(statusCounts, total, done, pctDone)
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -106,7 +107,7 @@ func GetBlockedFeatures(store *storage.FeatureStorage) ToolHandler {
 		}
 
 		var b strings.Builder
-		blockedCount := 0
+		var blocked []*types.FeatureData
 		for _, f := range features {
 			if len(f.DependsOn) == 0 {
 				continue
@@ -120,16 +121,18 @@ func GetBlockedFeatures(store *storage.FeatureStorage) ToolHandler {
 			}
 			if len(unblockers) > 0 {
 				fmt.Fprintf(&b, "- **%s** (%s) blocked by: %s\n", f.ID, f.Title, strings.Join(unblockers, ", "))
-				blockedCount++
+				blocked = append(blocked, f)
 			}
 		}
 
-		if blockedCount == 0 {
+		if len(blocked) == 0 {
 			return helpers.TextResult("## Blocked Features\n\nNo blocked features found."), nil
 		}
 
-		md := fmt.Sprintf("## Blocked Features (%d)\n\n%s", blockedCount, b.String())
-		return helpers.TextResult(md), nil
+		md := fmt.Sprintf("## Blocked Features (%d)\n\n%s", len(blocked), b.String())
+		pg := helpers.PaginationParams{Limit: len(blocked), Offset: 0}
+		ui := helpers.FeatureListUI(blocked, pg, len(blocked))
+		return helpers.RichResult(md, ui), nil
 	}
 }
 
@@ -158,6 +161,8 @@ func GetReviewQueue(store *storage.FeatureStorage) ToolHandler {
 			inReview = []*types.FeatureData{}
 		}
 
-		return helpers.TextResult(helpers.FormatFeatureListMD(inReview, "Review Queue")), nil
+		pg := helpers.PaginationParams{Limit: len(inReview), Offset: 0}
+		ui := helpers.FeatureListUI(inReview, pg, len(inReview))
+		return helpers.RichResult(helpers.FormatFeatureListMD(inReview, "Review Queue"), ui), nil
 	}
 }
