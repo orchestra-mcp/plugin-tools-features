@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
@@ -12,16 +13,26 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
+// dbTestMu serialises all tests that touch the globaldb singleton.
+// Even with -parallel 1, t.Cleanup callbacks can overlap with the next test's
+// setup, causing SQLITE_BUSY. Holding this lock for the full test lifetime
+// prevents concurrent open/close on the same DB file.
+var dbTestMu sync.Mutex
+
 // setupTestDB redirects globaldb to a temp directory and returns a cleanup func.
 func setupTestDB(t *testing.T) {
 	t.Helper()
+	dbTestMu.Lock()
 	tmpDir := t.TempDir()
 	os.MkdirAll(filepath.Join(tmpDir, ".orchestra", "db"), 0700)
 	t.Setenv("HOME", tmpDir)
 
 	// Reset globaldb singleton so it uses the new HOME.
 	globaldb.Close()
-	t.Cleanup(func() { globaldb.Close() })
+	t.Cleanup(func() {
+		globaldb.Close()
+		dbTestMu.Unlock()
+	})
 }
 
 func wfReq(args map[string]any) *pluginv1.ToolRequest {
